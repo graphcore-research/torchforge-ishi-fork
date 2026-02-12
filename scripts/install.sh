@@ -193,8 +193,18 @@ main() {
 
     log_info "Installing Forge from source..."
     
+    if compgen -G "assets/wheels/vllm-*.whl" > /dev/null; then
+        log_info "Found vllm wheel in ./assets/wheels that can provide precompiled CUDA kernels"
+    else
+        log_info "No vllm wheel found to provide precompiled CUDA kernels"
+        log_info "Creating compiled from scratch vllm wheel in ./assets/wheels. This takes a long time..."
+        rm -rf ../vllm/build ../vllm/vllm.egg-info
+        pip wheel --no-deps ../vllm -w assets/wheels
+    fi
+
     # Install dependencies. For vLLM use precompiled CUDA kernels
-    VLLM_USE_PRECOMPILED=1 pip install -e ".[dev]"
+    wheel="$(realpath assets/wheels/vllm-*.whl | head -n 1)"
+    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION="$wheel" pip install -e ".[dev]"
 
     # Set up environment
     log_info "Setting up environment..."
