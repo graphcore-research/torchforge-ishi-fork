@@ -192,7 +192,9 @@ main() {
     pip install "git+https://github.com/meta-pytorch/torchstore.git@${TORCHSTORE_BRANCH}"
 
     log_info "Installing Forge from source..."
-    pip install -e ".[dev]"
+    
+    # Install dependencies. For vLLM use precompiled CUDA kernels
+    VLLM_USE_PRECOMPILED=1 pip install -e ".[dev]"
 
     # Set up environment
     log_info "Setting up environment..."
