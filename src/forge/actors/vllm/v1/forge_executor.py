@@ -77,12 +77,7 @@ class ForgeWorkerWrapper(WorkerWrapper):
         Returns:
             Number of parameters loaded
         """
-        def timestamp():
-            from datetime import datetime
-            t = datetime.now()
-            return(t.strftime('%Y/%m/%d %H:%M:%S'))
-        
-        print(f"{timestamp()} forge_executor.py/apply_prefetched_weights()")
+        logger.info("forge_executor.py/apply_prefetched_weights()")
 
         if not shared_memory_handles:
             logger.warning(
