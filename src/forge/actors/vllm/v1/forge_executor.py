@@ -77,10 +77,13 @@ class ForgeWorkerWrapper(WorkerWrapper):
         Returns:
             Number of parameters loaded
         """
-        print("*** apply_prefetched_weights() in ForgeWorkerWrapper") # !!!
-        print("*** before:", self.vllm_config.model_config.hf_config.quantization_config)  # !!!
-        self.vllm_config.model_config.hf_config.quantization_config["quant_method"] = None  # Disable quantization for weight updating
-        print("*** after:", self.vllm_config.model_config.hf_config.quantization_config)  # !!!
+        def timestamp():
+            from datetime import datetime
+            t = datetime.now()
+            return(t.strftime('%Y/%m/%d %H:%M:%S'))
+        
+        print(f"{timestamp()} forge_executor.py/apply_prefetched_weights()")
+
         if not shared_memory_handles:
             logger.warning(
                 "[ForgeWorkerWrapper] Empty handles, apply_prefetched_weights is a no-op"
