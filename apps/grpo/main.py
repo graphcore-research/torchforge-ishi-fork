@@ -9,12 +9,13 @@
 import asyncio
 import traceback
 import uuid
+from typing import Any
 
 import torch
 import torchstore as ts
 import yaml
 from apps.grpo.data import DatasetActor
-from apps.grpo.grading import MathReward, ThinkingReward
+from apps.grpo.grading import AlienDigitsReward, MathReward, ThinkingReward
 from forge.actors.generator import Generator
 from forge.actors.reference_model import ReferenceModel
 from forge.actors.replay_buffer import ReplayBuffer
@@ -33,6 +34,72 @@ from forge.util.logging import get_logger
 from omegaconf import DictConfig, OmegaConf
 
 logger = get_logger("INFO")
+
+REWARD_REGISTRY = {
+    "math": MathReward,
+    "MathReward": MathReward,
+    "thinking": ThinkingReward,
+    "ThinkingReward": ThinkingReward,
+    "alien_digits": AlienDigitsReward,
+    "AlienDigitsReward": AlienDigitsReward,
+}
+
+
+def build_reward_functions(cfg: DictConfig) -> list[Any]:
+    """Build reward functions from config, with backward-compatible defaults."""
+    reward_profile = cfg.get("reward_profile")
+    reward_profiles = cfg.get("reward_profiles")
+
+    # Backward compatibility for existing configs.
+    if reward_profile is None and reward_profiles is None:
+        return [MathReward(), ThinkingReward()]
+
+    # If reward configuration is incomplete, fall back to original behavior.
+    if reward_profile is None:
+        logger.warning(
+            "reward_profiles is set but reward_profile is missing. "
+            "Falling back to default rewards: MathReward + ThinkingReward."
+        )
+        return [MathReward(), ThinkingReward()]
+    if reward_profiles is None:
+        logger.warning(
+            "reward_profile is set but reward_profiles is missing. "
+            "Falling back to default rewards: MathReward + ThinkingReward."
+        )
+        return [MathReward(), ThinkingReward()]
+
+    if reward_profile not in reward_profiles:
+        available = list(reward_profiles.keys())
+        raise ValueError(
+            f"Unknown reward_profile '{reward_profile}'. Available profiles: {available}"
+        )
+
+    specs = OmegaConf.to_container(reward_profiles[reward_profile], resolve=True)
+    if not isinstance(specs, list) or len(specs) == 0:
+        raise ValueError(
+            f"reward_profiles.{reward_profile} must be a non-empty list of reward specs."
+        )
+
+    reward_functions = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"Invalid reward spec {spec}. Each item must be a mapping with 'name' and optional 'kwargs'."
+            )
+        name = spec.get("name")
+        if name not in REWARD_REGISTRY:
+            available = sorted(REWARD_REGISTRY.keys())
+            raise ValueError(
+                f"Unknown reward name '{name}'. Available rewards: {available}"
+            )
+        kwargs = spec.get("kwargs", {})
+        if not isinstance(kwargs, dict):
+            raise ValueError(
+                f"Invalid kwargs for reward '{name}': expected mapping, got {type(kwargs)}"
+            )
+        reward_functions.append(REWARD_REGISTRY[name](**kwargs))
+
+    return reward_functions
 
 
 async def main(cfg: DictConfig):
@@ -84,6 +151,11 @@ async def main(cfg: DictConfig):
             "Either add ref_model to services config or set beta=0."
         )
 
+    reward_functions = build_reward_functions(cfg)
+    logger.info(
+        f"Reward functions: {[reward_fn.__class__.__name__ for reward_fn in reward_functions]}"
+    )
+
     # ---- Setup services ---- #
 
     async def noop():
@@ -113,7 +185,7 @@ async def main(cfg: DictConfig):
             else noop()
         ),
         RewardActor.options(**cfg.services.reward_actor).as_service(
-            reward_functions=[MathReward(), ThinkingReward()]
+            reward_functions=reward_functions
         ),
     )
 
