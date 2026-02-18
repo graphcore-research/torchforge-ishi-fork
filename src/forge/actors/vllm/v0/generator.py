@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from multiprocessing import resource_tracker
@@ -63,6 +63,15 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+def _to_builtin(value):
+    """Recursively convert config containers to plain Python types."""
+    if isinstance(value, Mapping):
+        return {k: _to_builtin(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_to_builtin(v) for v in value]
+    return value
+
+
 @dataclass
 class Generator(ForgeActor):
     """Instance of a vLLM-based generator.
@@ -103,12 +112,21 @@ class Generator(ForgeActor):
         self.generator_version: int = 0
 
         if isinstance(self.engine_args, Mapping):
-            self.engine_args = EngineArgs(**self.engine_args)
+            self.engine_args = EngineArgs(**_to_builtin(self.engine_args))
         self.engine_args._is_v1_supported_oracle = lambda *_: True
         self.vllm_config = self.engine_args.create_engine_config(UsageContext.LLM_CLASS)
 
         if isinstance(self.sampling_params, Mapping):
-            self.sampling_params = SamplingParams.from_optional(**self.sampling_params)
+            sampling_params = _to_builtin(self.sampling_params)
+            stop = sampling_params.get("stop")
+            if stop is not None and not isinstance(stop, list):
+                if isinstance(stop, Sequence) and not isinstance(
+                    stop, (str, bytes, bytearray)
+                ):
+                    sampling_params["stop"] = list(stop)
+                else:
+                    sampling_params["stop"] = [stop]
+            self.sampling_params = SamplingParams.from_optional(**sampling_params)
             self.sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
 
     @endpoint

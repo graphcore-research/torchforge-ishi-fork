@@ -12,7 +12,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from multiprocessing import resource_tracker
 from typing import Any, Optional
@@ -47,6 +47,15 @@ logger.setLevel(logging.INFO)
 
 # Suppress noisy vLLM "Added request" logs
 logging.getLogger("vllm.v1.engine.async_llm").setLevel(logging.WARNING)
+
+
+def _to_builtin(value: Any) -> Any:
+    """Recursively convert config containers to plain Python types."""
+    if isinstance(value, Mapping):
+        return {k: _to_builtin(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_to_builtin(v) for v in value]
+    return value
 
 
 @dataclass
@@ -88,11 +97,20 @@ class Generator(ForgeActor):
         self.weight_fetchers: Any = None  # Weight fetcher ActorMesh
 
         if isinstance(self.engine_args, Mapping):
-            self.engine_args = EngineArgs(**self.engine_args)
+            self.engine_args = EngineArgs(**_to_builtin(self.engine_args))
         self.vllm_config = self.engine_args.create_engine_config(UsageContext.LLM_CLASS)
 
         if isinstance(self.sampling_params, Mapping):
-            self.sampling_params = SamplingParams.from_optional(**self.sampling_params)
+            sampling_params = _to_builtin(self.sampling_params)
+            stop = sampling_params.get("stop")
+            if stop is not None and not isinstance(stop, list):
+                if isinstance(stop, Sequence) and not isinstance(
+                    stop, (str, bytes, bytearray)
+                ):
+                    sampling_params["stop"] = list(stop)
+                else:
+                    sampling_params["stop"] = [stop]
+            self.sampling_params = SamplingParams.from_optional(**sampling_params)
             self.sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
 
     @classmethod
