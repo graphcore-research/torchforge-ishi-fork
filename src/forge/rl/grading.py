@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import asyncio
 from dataclasses import dataclass
 from typing import Callable
 
@@ -24,6 +25,8 @@ class RewardActor(ForgeActor):
         reward_breakdown = {}  # reward breakdown by function
         for reward_fn in self.reward_functions:
             reward = reward_fn(prompt, response, target)
+            if asyncio.iscoroutine(reward):
+                reward = await reward
             total_rewards += reward
 
             # Get a name for the reward function (works for classes, functions, lambdas)
