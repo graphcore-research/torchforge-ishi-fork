@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from datasets import load_dataset
 from forge.controller.actor import ForgeActor
@@ -53,35 +52,10 @@ class DatasetActor(ForgeActor):
             formatted_target = target.split("#### ")[1]
             return {"request": formatted_request, "target": formatted_target}
 
-        def alien_jsonl_transform(sample):
-            request: str = sample["prompt"]
-            target: str = sample["target"]
-            return {"request": request, "target": target}
-
-        is_local_jsonl = Path(self.path).suffix.lower() == ".jsonl"
-        if is_local_jsonl:
-            self._base_dataset = load_dataset(
-                "json",
-                data_files=self.path,
-                split="train",
-                streaming=self.streaming,
-            )
-
-            # Keep only training examples and drop metadata rows.
-            self._base_dataset = self._base_dataset.filter(
-                lambda sample: sample.get("type") == "example"
-                and sample.get("split", self.data_split) == self.data_split
-            )
-            self._base_dataset = self._base_dataset.map(alien_jsonl_transform)
-        else:
-            self._base_dataset = load_dataset(
-                self.path,
-                self.revision,
-                split=self.data_split,
-                streaming=self.streaming,
-            )
-            self._base_dataset = self._base_dataset.map(gsm8k_transform)
-
+        self._base_dataset = load_dataset(
+            self.path, self.revision, split=self.data_split, streaming=self.streaming
+        )
+        self._base_dataset = self._base_dataset.map(gsm8k_transform)
         self._base_dataset = self._base_dataset.shuffle(seed=self.seed)
         self._base_dataset.set_epoch(self._epoch)
         self._iterator = iter(self._base_dataset)
