@@ -13,11 +13,11 @@ dependencies = [
     # PyTorch
     "torch==2.9.0",
     "torchdata>=0.8.0",
-    "torchtitan",
+    "torchtitan @ file:../torchtitan",
     "torchmonarch==0.2.0",
     # Issue 656: switch to ping torchstore nightly
     "torchstore",
-    "vllm",
+    "vllm @ file:../vllm",
     # Hugging Face integrations
     "datasets>=2.21.0",
     "tokenizers",
@@ -88,8 +88,6 @@ url  = "https://download.pytorch.org/whl/cu128"
 torch = { index = "pytorch-cu128" }
 # Issue 656: switch to ping torchstore nightly
 torchstore = { git = "https://github.com/meta-pytorch/torchstore.git", branch = "no-monarch-2026.01.05" }
-torchtitan = { path = "../torchtitan", editable = true }
-vllm = { path = "../vllm", editable = true }
 
 [tool.uv]
 # TODO: revert to stricter default uv strategy
