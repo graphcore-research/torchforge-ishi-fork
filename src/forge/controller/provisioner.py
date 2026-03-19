@@ -31,6 +31,34 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
+def _get_host_count(num_hosts: int | None, host_mesh: HostMesh | None) -> int:
+    if num_hosts is not None and num_hosts > 0:
+        return num_hosts
+
+    if host_mesh is not None:
+        try:
+            return int(host_mesh.extent["hosts"])
+        except (KeyError, TypeError, AttributeError):
+            pass
+
+    return 1
+
+
+def _log_gpu_allocation(
+    mesh_name: str, gpu_ids: list[str], num_hosts: int | None, host_mesh: HostMesh | None
+) -> None:
+    host_count = _get_host_count(num_hosts, host_mesh)
+    if host_count > 1:
+        logger.info(
+            "[Provisioner] Mesh '%s' allocated GPUs per host %s across %s host(s)",
+            mesh_name,
+            gpu_ids,
+            host_count,
+        )
+    else:
+        logger.info("[Provisioner] Mesh '%s' allocated GPUs %s", mesh_name, gpu_ids)
+
+
 def _get_port() -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("localhost", 0))
@@ -349,6 +377,7 @@ class Provisioner:
                 if not addr or not port:
                     addr, port = await get_remote_info(host_mesh)
                 gpu_ids = gpu_manager.get_gpus(num_procs)
+                _log_gpu_allocation(mesh_name, gpu_ids, num_hosts, host_mesh)
 
                 env_vars["MASTER_ADDR"] = addr
                 env_vars["MASTER_PORT"] = port
