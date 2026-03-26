@@ -253,7 +253,7 @@ async def main(cfg: DictConfig):
             )
             record_metric(
                 "main/continuous_rollouts/episodes_dropped/truncated",
-                num_truncated,
+                n if is_truncated else 0,
                 Reduce.SUM,
             )
             record_metric(
