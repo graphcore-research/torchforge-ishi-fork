@@ -47,11 +47,10 @@ class RewardActor(ForgeActor):
                 Reduce.STD,
             )
 
-            record_metric(
-                "reward/evaluate_response/avg_total_reward",
-                reward,
-                Reduce.MEAN,
-            )
-
         avg_reward: float = total_rewards / len(self.reward_functions)
+        record_metric(
+            "reward/evaluate_response/avg_total_reward",
+            avg_reward,
+            Reduce.MEAN,
+        )
         return reward_breakdown, avg_reward
