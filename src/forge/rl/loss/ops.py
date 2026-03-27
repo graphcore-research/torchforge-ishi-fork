@@ -203,6 +203,25 @@ def compute_ratio(
         raise ValueError(f"Unknown ratio_type: {ratio_type}")
 
     with torch.no_grad():
+        ess_metrics = []
+        seq_mask = mask.sum(dim=-1) > 0
+        if seq_mask.any():
+            seq_log_weights = (log_ratio * mask).sum(dim=-1)[seq_mask]
+            stable_seq_weights = torch.exp(
+                seq_log_weights - seq_log_weights.max()
+            )
+            ess = stable_seq_weights.sum().square() / (
+                stable_seq_weights.numel()
+                * stable_seq_weights.square().sum().clamp(min=1e-12)
+            )
+            ess_metrics.append(
+                Metric(
+                    key="loss/ess/mean",
+                    value=ess,
+                    reduction=Reduce.MEAN,
+                )
+            )
+
         metrics = [
             Metric(
                 key="loss/ratio/mean",
@@ -214,7 +233,7 @@ def compute_ratio(
                 value=masked_mean(-log_ratio, mask),
                 reduction=Reduce.MEAN,
             ),
-        ]
+        ] + ess_metrics
 
     return ratio, log_ratio, metrics
 
