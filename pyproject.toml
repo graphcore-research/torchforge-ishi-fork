@@ -89,6 +89,9 @@ torch = { index = "pytorch-cu128" }
 # Issue 656: switch to ping torchstore nightly
 torchstore = { git = "https://github.com/meta-pytorch/torchstore.git", branch = "no-monarch-2026.01.05" }
 
+vllm = { path = "../vllm", package = true, editable = true }
+torchtitan = { path = "../torchtitan", package = true, editable = true }
+
 [tool.uv]
 # TODO: revert to stricter default uv strategy
 index-strategy = "unsafe-best-match"
