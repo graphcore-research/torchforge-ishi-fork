@@ -165,9 +165,9 @@ def compare_logits(
     hf_logits_cpu = hf_logits.detach().cpu().float()
 
     # Basic shape check
-    assert (
-        titan_logits_cpu.shape == hf_logits_cpu.shape
-    ), f"Shape mismatch: titan {titan_logits_cpu.shape} vs hf {hf_logits_cpu.shape}"
+    assert titan_logits_cpu.shape == hf_logits_cpu.shape, (
+        f"Shape mismatch: titan {titan_logits_cpu.shape} vs hf {hf_logits_cpu.shape}"
+    )
 
     # Compute various metrics
     diff = titan_logits_cpu - hf_logits_cpu

@@ -840,9 +840,9 @@ async def test_session_router_assigns_and_updates_session_map_in_service():
 
         # Difference should only be on one replica (sticky session)
         diffs = [v2 - v1 for v1, v2 in zip(values1, values2)]
-        assert (
-            sum(diffs) == 1
-        ), f"Expected exactly one replica to increment, got {diffs}"
+        assert sum(diffs) == 1, (
+            f"Expected exactly one replica to increment, got {diffs}"
+        )
         assert max(diffs) == 1 and min(diffs) == 0
 
         # Session map in service should reflect assigned replica

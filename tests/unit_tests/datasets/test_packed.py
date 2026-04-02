@@ -889,9 +889,9 @@ class TestPackedDataset:
 
         # Check that expected tokens are present and dropped tokens are not
         expected_tokens = {0, 2, 4, 999}
-        assert (
-            all_tokens == expected_tokens
-        ), f"Expected {expected_tokens}, got {all_tokens}"
+        assert all_tokens == expected_tokens, (
+            f"Expected {expected_tokens}, got {all_tokens}"
+        )
 
     def test_checkpoint_and_resume(self, dataset_factory):
         """Test checkpointing and resumption functionality using StatefulDataLoader

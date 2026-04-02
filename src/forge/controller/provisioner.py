@@ -157,20 +157,20 @@ class GpuManager:
             available_devices = set(range(0, max_device_count))
         else:
             # Validate types first
-            assert all(
-                isinstance(x, int) for x in available_devices
-            ), f"All device IDs must be integers, got: {available_devices}"
+            assert all(isinstance(x, int) for x in available_devices), (
+                f"All device IDs must be integers, got: {available_devices}"
+            )
             # When available_devices is provided (e.g., from CUDA_VISIBLE_DEVICES),
             # adjust max_device_count to accommodate the highest device ID
             if available_devices:
                 max_device_count = max(max(available_devices) + 1, max_device_count)
 
-        assert all(
-            isinstance(x, int) for x in available_devices
-        ), f"All device IDs must be integers, got: {available_devices}"
-        assert all(
-            x >= 0 for x in available_devices
-        ), f"All device IDs must be non-negative, got: {available_devices}"
+        assert all(isinstance(x, int) for x in available_devices), (
+            f"All device IDs must be integers, got: {available_devices}"
+        )
+        assert all(x >= 0 for x in available_devices), (
+            f"All device IDs must be non-negative, got: {available_devices}"
+        )
         self.available_gpus = available_devices
         self.max_device_count = max_device_count
 

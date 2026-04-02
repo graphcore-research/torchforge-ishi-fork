@@ -11,7 +11,6 @@ from .conftest import assert_close
 
 
 class TestGSPOLoss:
-
     def test_forward(self, inputs):
         d = inputs
         logits = d["logits"].clone().requires_grad_(True)

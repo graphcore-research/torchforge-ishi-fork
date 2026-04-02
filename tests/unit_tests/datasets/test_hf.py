@@ -175,13 +175,13 @@ class TestHfIterableDataset:
         # 4. Verify checkpointing and resumption
         orig_post_ids = [b["id"].tolist() for b in result["post_checkpoint_batches"]]
         resumed_ids = [b["id"].tolist() for b in result["resumed_batches"]]
-        assert (
-            orig_post_ids == resumed_ids
-        ), "Resumed batches should be identical for deterministic run"
+        assert orig_post_ids == resumed_ids, (
+            "Resumed batches should be identical for deterministic run"
+        )
 
-        assert (
-            result["post_checkpoint_metrics"] == result["resumed_metrics"]
-        ), "Resumed training should produce same metrics as original training"
+        assert result["post_checkpoint_metrics"] == result["resumed_metrics"], (
+            "Resumed training should produce same metrics as original training"
+        )
 
     def test_shuffling_behavior(self, dataset_factory, small_dataset_file):
         """Tests that shuffling changes data order between epochs but preserves the set of samples."""
@@ -218,20 +218,20 @@ class TestHfIterableDataset:
         second_epoch_ids = [sample["id"] for sample in second_epoch_samples]
 
         # Shuffled epochs should have different order
-        assert first_epoch_ids != list(
-            range(SMALL_DATASET_SIZE)
-        ), f"Shuffled should not be sorted, got {first_epoch_ids}"
-        assert (
-            first_epoch_ids != second_epoch_ids
-        ), f"Shuffled epochs should be shuffled differently, got {first_epoch_ids} and {second_epoch_ids}"
+        assert first_epoch_ids != list(range(SMALL_DATASET_SIZE)), (
+            f"Shuffled should not be sorted, got {first_epoch_ids}"
+        )
+        assert first_epoch_ids != second_epoch_ids, (
+            f"Shuffled epochs should be shuffled differently, got {first_epoch_ids} and {second_epoch_ids}"
+        )
 
         # But should contain the same set of IDs
-        assert set(first_epoch_ids) == set(
-            range(SMALL_DATASET_SIZE)
-        ), f"First epoch samples should be (0-{SMALL_DATASET_SIZE - 1}), got {first_epoch_ids}"
-        assert set(second_epoch_ids) == set(
-            range(SMALL_DATASET_SIZE)
-        ), f"Second epoch samples should be (0-{SMALL_DATASET_SIZE - 1}), got {second_epoch_ids}"
+        assert set(first_epoch_ids) == set(range(SMALL_DATASET_SIZE)), (
+            f"First epoch samples should be (0-{SMALL_DATASET_SIZE - 1}), got {first_epoch_ids}"
+        )
+        assert set(second_epoch_ids) == set(range(SMALL_DATASET_SIZE)), (
+            f"Second epoch samples should be (0-{SMALL_DATASET_SIZE - 1}), got {second_epoch_ids}"
+        )
 
     def test_epoch_tracking(self, dataset_factory, small_dataset_file):
         """Test that epoch number is correctly tracked across dataset restarts."""
@@ -250,9 +250,9 @@ class TestHfIterableDataset:
         epoch_values = [
             metric.value for metric in first_epoch_metrics if "num_epochs" in metric.key
         ]
-        assert all(
-            epoch_value == 0 for epoch_value in epoch_values
-        ), f"Epoch values should be 0, got {epoch_values}"
+        assert all(epoch_value == 0 for epoch_value in epoch_values), (
+            f"Epoch values should be 0, got {epoch_values}"
+        )
 
         # All should have epoch 1
         second_epoch_metrics = []
@@ -263,9 +263,9 @@ class TestHfIterableDataset:
             for metric in second_epoch_metrics
             if "num_epochs" in metric.key
         ]
-        assert all(
-            epoch_value == 1 for epoch_value in epoch_values
-        ), f"Epoch values should be 1, got {epoch_values}"
+        assert all(epoch_value == 1 for epoch_value in epoch_values), (
+            f"Epoch values should be 1, got {epoch_values}"
+        )
 
     def test_multiple_iter_calls_after_resume(
         self, dataset_factory, small_dataset_file
@@ -304,9 +304,9 @@ class TestHfIterableDataset:
             for metric in sample["metrics"]
             if "num_epochs" in metric.key
         ]
-        assert all(
-            epoch == 2 for epoch in first_iter_epochs
-        ), f"First iter() should start at checkpoint epoch 2, got {set(first_iter_epochs)}"
+        assert all(epoch == 2 for epoch in first_iter_epochs), (
+            f"First iter() should start at checkpoint epoch 2, got {set(first_iter_epochs)}"
+        )
 
         # Consume one more epoch from the same iterator (now at epoch 3)
         second_epoch_samples = list(islice(it2, SMALL_DATASET_SIZE))
@@ -316,9 +316,9 @@ class TestHfIterableDataset:
             for metric in sample["metrics"]
             if "num_epochs" in metric.key
         ]
-        assert all(
-            epoch == 3 for epoch in second_epoch_epochs
-        ), f"Second epoch should be 3, got {set(second_epoch_epochs)}"
+        assert all(epoch == 3 for epoch in second_epoch_epochs), (
+            f"Second epoch should be 3, got {set(second_epoch_epochs)}"
+        )
 
         # Call iter() again - it should restart from epoch 2, not continue from 4
         it3 = iter(dataset2)
@@ -329,9 +329,9 @@ class TestHfIterableDataset:
             for metric in sample["metrics"]
             if "num_epochs" in metric.key
         ]
-        assert all(
-            epoch == 2 for epoch in new_iter_epochs
-        ), f"New iter() should restart from checkpoint epoch 2, got {set(new_iter_epochs)}"
+        assert all(epoch == 2 for epoch in new_iter_epochs), (
+            f"New iter() should restart from checkpoint epoch 2, got {set(new_iter_epochs)}"
+        )
 
 
 class TestDistributedHfIterableDataset(FSDPTest):

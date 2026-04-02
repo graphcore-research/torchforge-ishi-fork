@@ -87,9 +87,9 @@ class TuneMessage:
         if isinstance(content, str):
             return [{"type": "text", "content": content}]
 
-        assert isinstance(
-            content, list
-        ), f"content must be of type list[dict[str, Any]], got {content}"
+        assert isinstance(content, list), (
+            f"content must be of type list[dict[str, Any]], got {content}"
+        )
 
         return content
 

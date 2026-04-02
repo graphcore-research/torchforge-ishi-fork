@@ -479,9 +479,9 @@ class TestSharedTensorMultiprocess:
 
         # Verify result
         expected = input_data * 2
-        assert torch.allclose(
-            output_shared.tensor, expected
-        ), "output: {}, expected: {}".format(output_shared.tensor, expected)
+        assert torch.allclose(output_shared.tensor, expected), (
+            "output: {}, expected: {}".format(output_shared.tensor, expected)
+        )
 
         input_shared.drop()
         output_shared.drop()
@@ -896,9 +896,9 @@ class TestSharedTensorCloseAndCleanup:
 
         # Check no leaks
         shm_after = len(glob.glob("/dev/shm/shared_tensor_*"))
-        assert (
-            shm_after == shm_before
-        ), f"Memory leak detected: {shm_after - shm_before} tensors leaked"
+        assert shm_after == shm_before, (
+            f"Memory leak detected: {shm_after - shm_before} tensors leaked"
+        )
 
 
 if __name__ == "__main__":

@@ -266,15 +266,15 @@ class TestInterleavedDataset:
         expected_ds3_ratio = 0.5
 
         # Allow 10% tolerance due to randomness
-        assert (
-            abs(ds1_ratio - expected_ds1_ratio) < 0.1
-        ), f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
-        assert (
-            abs(ds2_ratio - expected_ds2_ratio) < 0.1
-        ), f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
-        assert (
-            abs(ds3_ratio - expected_ds3_ratio) < 0.1
-        ), f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+        assert abs(ds1_ratio - expected_ds1_ratio) < 0.1, (
+            f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
+        )
+        assert abs(ds2_ratio - expected_ds2_ratio) < 0.1, (
+            f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
+        )
+        assert abs(ds3_ratio - expected_ds3_ratio) < 0.1, (
+            f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+        )
 
     def test_metrics_aggregation(
         self,
@@ -347,15 +347,15 @@ class TestInterleavedDataset:
         expected_ds3_ratio = 0.5
 
         # Allow 10% tolerance due to randomness
-        assert (
-            abs(ds1_ratio - expected_ds1_ratio) < 0.1
-        ), f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
-        assert (
-            abs(ds2_ratio - expected_ds2_ratio) < 0.1
-        ), f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
-        assert (
-            abs(ds3_ratio - expected_ds3_ratio) < 0.1
-        ), f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+        assert abs(ds1_ratio - expected_ds1_ratio) < 0.1, (
+            f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
+        )
+        assert abs(ds2_ratio - expected_ds2_ratio) < 0.1, (
+            f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
+        )
+        assert abs(ds3_ratio - expected_ds3_ratio) < 0.1, (
+            f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+        )
 
     def test_checkpointing(
         self,
@@ -402,12 +402,12 @@ class TestInterleavedDataset:
         # After loading a checkpoint, training should continue identically
         orig_post_ids = [b["id"].tolist() for b in result["post_checkpoint_batches"]]
         resumed_ids = [b["id"].tolist() for b in result["resumed_batches"]]
-        assert (
-            orig_post_ids == resumed_ids
-        ), "Resumed batches should be identical for deterministic run"
-        assert (
-            result["post_checkpoint_metrics"] == result["resumed_metrics"]
-        ), "Resumed training should produce same metrics as original training"
+        assert orig_post_ids == resumed_ids, (
+            "Resumed batches should be identical for deterministic run"
+        )
+        assert result["post_checkpoint_metrics"] == result["resumed_metrics"], (
+            "Resumed training should produce same metrics as original training"
+        )
 
         # Test sampling log functionality
         # Check that sampling log contains tuples of (iteration_count, dataset_name)
@@ -453,15 +453,15 @@ class TestInterleavedDataset:
         expected_ds3_ratio = 0.5
 
         # Allow larger tolerance due to small sample size in checkpointing test
-        assert (
-            abs(ds1_ratio - expected_ds1_ratio) < 0.2
-        ), f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
-        assert (
-            abs(ds2_ratio - expected_ds2_ratio) < 0.2
-        ), f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
-        assert (
-            abs(ds3_ratio - expected_ds3_ratio) < 0.2
-        ), f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+        assert abs(ds1_ratio - expected_ds1_ratio) < 0.2, (
+            f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
+        )
+        assert abs(ds2_ratio - expected_ds2_ratio) < 0.2, (
+            f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
+        )
+        assert abs(ds3_ratio - expected_ds3_ratio) < 0.2, (
+            f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+        )
 
 
 class TestDistributedInterleavedDataset(FSDPTest):
@@ -572,9 +572,9 @@ class TestDistributedInterleavedDataset(FSDPTest):
                 f"Rank {rank}: Non-deterministic interleaved resume. "
                 f"This indicates sampling state is not properly preserved."
             )
-            assert (
-                result["post_checkpoint_metrics"] == result["resumed_metrics"]
-            ), "Resumed training should produce same metrics as original training"
+            assert result["post_checkpoint_metrics"] == result["resumed_metrics"], (
+                "Resumed training should produce same metrics as original training"
+            )
 
             # Verify sampling ratio is approximately maintained for nested structure
             all_ids = []
@@ -606,15 +606,15 @@ class TestDistributedInterleavedDataset(FSDPTest):
                 expected_ds2_ratio = 0.35
                 expected_ds3_ratio = 0.5
 
-                assert (
-                    abs(ds1_ratio - expected_ds1_ratio) < 0.1
-                ), f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
-                assert (
-                    abs(ds2_ratio - expected_ds2_ratio) < 0.1
-                ), f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
-                assert (
-                    abs(ds3_ratio - expected_ds3_ratio) < 0.1
-                ), f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+                assert abs(ds1_ratio - expected_ds1_ratio) < 0.1, (
+                    f"ds1 ratio {ds1_ratio:.2f} should be ~{expected_ds1_ratio}"
+                )
+                assert abs(ds2_ratio - expected_ds2_ratio) < 0.1, (
+                    f"ds2 ratio {ds2_ratio:.2f} should be ~{expected_ds2_ratio}"
+                )
+                assert abs(ds3_ratio - expected_ds3_ratio) < 0.1, (
+                    f"ds3 ratio {ds3_ratio:.2f} should be ~{expected_ds3_ratio}"
+                )
 
         finally:
             # Each rank cleans its own temp dir

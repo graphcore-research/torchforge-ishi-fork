@@ -178,7 +178,7 @@ class _FutureWrapper:
                 ) from e
             except Exception as e:
                 raise RuntimeError(
-                    f"Monarch RPC failed: {e}. " "Check worker connectivity and logs."
+                    f"Monarch RPC failed: {e}. Check worker connectivity and logs."
                 ) from e
             # Extract values from ValueMesh
             outputs = []

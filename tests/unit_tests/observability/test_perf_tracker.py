@@ -152,9 +152,9 @@ class TestTracingModes:
         # Use 0.7s threshold to allow for CI system load variability
         assert results[0] == f"{mode}_done"
         assert results[1] == f"{mode}_done"
-        assert (
-            total_time < 0.7
-        ), f"Expected ~0.4s concurrent execution, got {total_time:.3f}s"
+        assert total_time < 0.7, (
+            f"Expected ~0.4s concurrent execution, got {total_time:.3f}s"
+        )
 
         # Verify backend selection
         if mode == "direct":
@@ -183,9 +183,9 @@ class TestTracingModes:
             b_metrics = [
                 name for name, _, _ in mock_record_metric_calls if "/b/duration" in name
             ]
-            assert (
-                len(b_metrics) == 12
-            ), f"Expected 12 'b' metrics, got {len(b_metrics)}"
+            assert len(b_metrics) == 12, (
+                f"Expected 12 'b' metrics, got {len(b_metrics)}"
+            )
         else:  # decorator mode
             # Decorator mode only has total duration (no steps)
             expected_metrics = {
@@ -244,9 +244,9 @@ class TestTracingModes:
         memory_metrics = [
             name for name, _, _ in mock_record_metric_calls if "memory_" in name
         ]
-        assert all(
-            "outer/" in m for m in memory_metrics
-        ), "Only outer should track memory"
+        assert all("outer/" in m for m in memory_metrics), (
+            "Only outer should track memory"
+        )
 
 
 class TestErrorConditionsAndCompatibility:

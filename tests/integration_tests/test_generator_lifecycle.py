@@ -154,12 +154,12 @@ async def test_generator_shutdown_cleanup():
         print(f"[After Launch] GPU processes: {len(after_launch_gpu_pids)}")
 
         # Should have more processes after launch
-        assert (
-            len(after_launch_children) > initial_child_count
-        ), "Expected child processes to be created during launch"
-        assert len(after_launch_gpu_pids) > len(
-            initial_gpu_pids
-        ), "Expected GPU processes to be created during launch"
+        assert len(after_launch_children) > initial_child_count, (
+            "Expected child processes to be created during launch"
+        )
+        assert len(after_launch_gpu_pids) > len(initial_gpu_pids), (
+            "Expected GPU processes to be created during launch"
+        )
 
         await generator.shutdown()
 

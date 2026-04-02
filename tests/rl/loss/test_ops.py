@@ -21,7 +21,6 @@ from .conftest import assert_close, get_metric
 
 
 class TestMaskedMean:
-
     def test_basic(self, inputs):
         d = inputs
         result = masked_mean(d["advantages"], d["loss_mask"])
@@ -41,7 +40,6 @@ class TestMaskedMean:
 
 
 class TestCreateShiftedTargets:
-
     def test_without_mask(self):
         input_ids = torch.tensor([[10, 20, 30, 40], [50, 60, 70, 80]])
         targets = create_shifted_targets(input_ids)
@@ -67,7 +65,6 @@ class TestCreateShiftedTargets:
 
 
 class TestComputeLogprobs:
-
     def test_forward(self, inputs):
         d = inputs
         logits = d["logits"].clone().requires_grad_(True)
@@ -91,7 +88,6 @@ class TestComputeLogprobs:
 
 
 class TestComputeEntropy:
-
     def test_forward(self, inputs):
         d = inputs
         logits = d["logits"].clone().requires_grad_(True)
@@ -117,7 +113,6 @@ class TestComputeEntropy:
 
 
 class TestComputeRatio:
-
     def test_token_forward(self, inputs):
         d = inputs
         logprobs = d["logprobs"].clone().requires_grad_(True)
@@ -184,7 +179,6 @@ class TestComputeRatio:
 
 
 class TestComputeKl:
-
     @pytest.mark.parametrize(
         "kl_type,expected_kl,expected_mean,expected_grad_norm",
         [
@@ -246,7 +240,6 @@ class TestComputeKl:
 
 
 class TestAggregate:
-
     @pytest.mark.parametrize(
         "agg_type,expected_loss,expected_grad_norm",
         [

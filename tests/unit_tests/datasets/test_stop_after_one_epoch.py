@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Tests for StopAfterOneEpoch iterator and extract_epoch_from_batch helper."""
+
 from pathlib import Path
 
 import pytest
@@ -171,9 +172,9 @@ class TestStopAfterOneEpochDistributed(FSDPTest):
 
             # All ranks should have processed exactly one epoch
             # Since dataset is split across ranks, each rank gets 10 samples = 5 batches
-            assert (
-                len(batches) == 5
-            ), f"Rank {rank} expected 5 batches, got {len(batches)}"
+            assert len(batches) == 5, (
+                f"Rank {rank} expected 5 batches, got {len(batches)}"
+            )
 
             # Synchronize to ensure both ranks completed
             dist.barrier()
