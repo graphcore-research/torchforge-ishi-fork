@@ -38,6 +38,7 @@ class Observation:
 class Launcher(Enum):
     MAST = "mast"
     SLURM = "slurm"
+    KUBERNETES = "kubernetes"
 
 
 @dataclass
@@ -110,6 +111,7 @@ class LauncherConfig:
     services: dict[str, ServiceConfig] = field(default_factory=dict)
     actors: dict[str, ProcessConfig] = field(default_factory=dict)
     slurm_args: dict[str, str] = field(default_factory=dict)
+    kubernetes_args: dict[str, Any] = field(default_factory=dict)
     cpus_per_task: int | None = None  # CPUs per node (SLURM param, can get with sinfo)
     mem: int | None = (  # noqa: N815
         None  # Memory per node (SLURM param, can get with sinfo)

@@ -8,11 +8,16 @@
 
 import atexit
 import logging
+import os
+import shlex
+import textwrap
 
 from forge.controller.base import BaseLauncher
 from forge.types import Launcher, LauncherConfig
+from kubernetes import client
 from monarch.actor import ProcMesh
 from monarch.job import JobState, JobTrait, SlurmJob
+from monarch.job.kubernetes import KubernetesJob
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -20,6 +25,19 @@ logger.setLevel(logging.DEBUG)
 
 JOB_NAME_KEY = "job_name"
 LAUNCHER_KEY = "launcher"
+DEFAULT_KUBERNETES_IMAGE = "nvcr.io/nvidia/pytorch:25.03-py3"
+DEFAULT_MONARCH_PORT = 26600
+
+_WORKER_LOOP_SCRIPT = textwrap.dedent("""\
+    import os
+    import socket
+    from monarch.actor import run_worker_loop_forever
+
+    port = os.environ.get("MONARCH_PORT", "26600")
+    hostname = socket.getfqdn()
+    address = f"tcp://{hostname}:{port}"
+    run_worker_loop_forever(address=address, ca="trust_all_connections")
+""")
 
 
 def get_meshes_from_config(cfg: LauncherConfig) -> dict[str, int]:
@@ -52,6 +70,80 @@ def get_meshes_from_config(cfg: LauncherConfig) -> dict[str, int]:
             meshes[mesh_name] = hosts
 
     return meshes
+
+
+def get_kubernetes_mesh_names(meshes: dict[str, int]) -> dict[str, str]:
+    # Kubernetes provisioning requires DNS-safe mesh names, so remap the
+    # Forge names internally and preserve the original names in the returned state.
+    return {mesh_name: f"mesh{idx}" for idx, mesh_name in enumerate(meshes)}
+
+
+def build_kubernetes_worker_pod_spec(
+    image: str,
+    gpus_per_node: int,
+    gc_user: str,
+) -> client.V1PodSpec:
+    worker_command = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+        export PIP_CONSTRAINT=""
+        export USER="root"
+        export UV_CACHE_DIR="/newdata/$GC_USER/.cache/uv"
+        export PIP_CACHE_DIR="/newdata/$GC_USER/.cache/pip"
+        export UV_PROJECT_ENVIRONMENT="/tmp/ishikori-worker-venv"
+        cd "/newdata/$GC_USER/ishikori"
+        python -m pip install uv
+        uv sync --frozen
+        exec uv run python -u -c {shlex.quote(_WORKER_LOOP_SCRIPT)}
+        """
+    )
+    gpu_resources = {"nvidia.com/gpu": str(gpus_per_node)}
+
+    return client.V1PodSpec(
+        security_context=client.V1PodSecurityContext(fs_group=0),
+        tolerations=[
+            client.V1Toleration(
+                key="nvidia.com/gpu",
+                value="true",
+                operator="Equal",
+                effect="NoSchedule",
+            )
+        ],
+        containers=[
+            client.V1Container(
+                name="worker",
+                image=image,
+                command=["/bin/bash", "-lc", worker_command],
+                env=[
+                    client.V1EnvVar(
+                        name="MONARCH_PORT", value=str(DEFAULT_MONARCH_PORT)
+                    ),
+                    client.V1EnvVar(name="GC_USER", value=gc_user),
+                ],
+                resources=client.V1ResourceRequirements(
+                    requests=gpu_resources,
+                    limits=gpu_resources,
+                ),
+                volume_mounts=[
+                    client.V1VolumeMount(name="newdata", mount_path="/newdata"),
+                    client.V1VolumeMount(name="devshm", mount_path="/dev/shm"),
+                ],
+            )
+        ],
+        volumes=[
+            client.V1Volume(
+                name="newdata",
+                host_path=client.V1HostPathVolumeSource(path="/newdata"),
+            ),
+            client.V1Volume(
+                name="devshm",
+                empty_dir=client.V1EmptyDirVolumeSource(
+                    medium="Memory",
+                    size_limit="128Gi",
+                ),
+            ),
+        ],
+    )
 
 
 class Slurmlauncher(BaseLauncher):
@@ -110,11 +202,73 @@ class Slurmlauncher(BaseLauncher):
         return
 
 
+class KubernetesLauncher(BaseLauncher):
+    def __init__(
+        self,
+        cfg: LauncherConfig,
+    ):
+        self.cfg = cfg
+
+    async def initialize(self) -> tuple[JobTrait, JobState]:
+        """Initialize the launcher and create a single KubernetesJob for all resources."""
+        meshes = get_meshes_from_config(self.cfg)
+
+        if not meshes:
+            return
+
+        kubernetes_args = self.cfg.kubernetes_args
+        mesh_names = get_kubernetes_mesh_names(meshes)
+        gc_user = os.environ["GC_USER"]
+        worker_image = kubernetes_args.get("image", DEFAULT_KUBERNETES_IMAGE)
+
+        job = KubernetesJob(
+            namespace=kubernetes_args["namespace"],
+            timeout=kubernetes_args.get("timeout"),
+        )
+
+        for forge_mesh_name, host_count in meshes.items():
+            job.add_mesh(
+                name=mesh_names[forge_mesh_name],
+                num_replicas=host_count,
+                pod_spec=build_kubernetes_worker_pod_spec(
+                    image=worker_image,
+                    gpus_per_node=self.cfg.gpus_per_node,
+                    gc_user=gc_user,
+                ),
+                labels=kubernetes_args.get("labels"),
+            )
+
+        logger.info(f"Creating KubernetesJob with meshes: {meshes}")
+        job.apply()
+        logger.info("KubernetesJob submitted, waiting for allocation...")
+
+        atexit.register(job.kill)
+
+        raw_state = job.state(cached_path=None)
+
+        # Rebuild JobState with the original Forge mesh names so downstream
+        # callers can keep using their existing mesh_name lookups unchanged.
+        job_state = JobState(
+            {
+                forge_mesh_name: getattr(raw_state, kubernetes_mesh_name)
+                for forge_mesh_name, kubernetes_mesh_name in mesh_names.items()
+            }
+        )
+
+        logger.info("KubernetesLauncher initialization complete.")
+        return job, job_state
+
+    async def remote_setup(self, procs: ProcMesh) -> None:
+        return
+
+
 def get_launcher(cfg: LauncherConfig | None = None) -> BaseLauncher | None:
     if not cfg:
         return None
     if cfg.launcher == Launcher.SLURM:
         return Slurmlauncher(cfg)
+    elif cfg.launcher == Launcher.KUBERNETES:
+        return KubernetesLauncher(cfg)
     elif cfg.launcher == Launcher.MAST:
         try:
             from forge.fb.mast_launcher import MastLauncher
