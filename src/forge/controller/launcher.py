@@ -75,10 +75,39 @@ def get_meshes_from_config(cfg: LauncherConfig) -> dict[str, int]:
     return meshes
 
 
-def get_kubernetes_mesh_names(meshes: dict[str, int]) -> dict[str, str]:
-    # Kubernetes provisioning requires DNS-safe mesh names, so remap the
-    # Forge names internally and preserve the original names in the returned state.
-    return {mesh_name: f"mesh{idx}" for idx, mesh_name in enumerate(meshes)}
+def build_kubernetes_pooled_job_state(
+    pooled_host_mesh: Any,
+    meshes: dict[str, int],
+) -> JobState:
+    """Rebuild logical HostMeshes by slicing a pooled Kubernetes HostMesh.
+
+    Args:
+        pooled_host_mesh: The single HostMesh returned by KubernetesJob.state().
+        meshes: Ordered mapping of logical Forge mesh names to requested host counts.
+
+    Returns:
+        JobState exposing the original logical mesh names backed by HostMesh slices.
+
+    Raises:
+        RuntimeError: If the pooled HostMesh size does not match the requested host count.
+    """
+    total_hosts = sum(meshes.values())
+    actual_hosts = pooled_host_mesh.extent["hosts"]
+    if actual_hosts != total_hosts:
+        raise RuntimeError(
+            "Pooled Kubernetes HostMesh size mismatch: "
+            f"expected {total_hosts} host(s) but received {actual_hosts}."
+        )
+
+    host_offset = 0
+    logical_meshes: dict[str, Any] = {}
+    for forge_mesh_name, host_count in meshes.items():
+        logical_meshes[forge_mesh_name] = pooled_host_mesh.slice(
+            hosts=slice(host_offset, host_offset + host_count)
+        )
+        host_offset += host_count
+
+    return JobState(logical_meshes)
 
 
 def build_kubernetes_worker_pod_spec(
@@ -229,26 +258,26 @@ class KubernetesLauncher(BaseLauncher):
             return
 
         kubernetes_args = self.cfg.kubernetes_args
-        mesh_names = get_kubernetes_mesh_names(meshes)
         gc_user = os.environ["GC_USER"]
         worker_image = kubernetes_args.get("image", DEFAULT_KUBERNETES_IMAGE)
+        pooled_mesh_name = f"mesh0{gc_user}"[:63]
+        total_hosts = sum(meshes.values())
 
         job = KubernetesJob(
             namespace=kubernetes_args["namespace"],
             timeout=kubernetes_args.get("timeout"),
         )
 
-        for forge_mesh_name, host_count in meshes.items():
-            job.add_mesh(
-                name=mesh_names[forge_mesh_name],
-                num_replicas=host_count,
-                pod_spec=build_kubernetes_worker_pod_spec(
-                    image=worker_image,
-                    gpus_per_node=self.cfg.gpus_per_node,
-                    gc_user=gc_user,
-                ),
-                labels=kubernetes_args.get("labels"),
-            )
+        job.add_mesh(
+            name=pooled_mesh_name,
+            num_replicas=total_hosts,
+            pod_spec=build_kubernetes_worker_pod_spec(
+                image=worker_image,
+                gpus_per_node=self.cfg.gpus_per_node,
+                gc_user=gc_user,
+            ),
+            labels=kubernetes_args.get("labels"),
+        )
 
         logger.info(f"Creating KubernetesJob with meshes: {meshes}")
         job.apply()
@@ -257,15 +286,14 @@ class KubernetesLauncher(BaseLauncher):
         atexit.register(job.kill)
 
         raw_state = job.state(cached_path=None)
-
-        # Rebuild JobState with the original Forge mesh names so downstream
-        # callers can keep using their existing mesh_name lookups unchanged.
-        job_state = JobState(
-            {
-                forge_mesh_name: getattr(raw_state, kubernetes_mesh_name)
-                for forge_mesh_name, kubernetes_mesh_name in mesh_names.items()
-            }
-        )
+        try:
+            pooled_host_mesh = getattr(raw_state, pooled_mesh_name)
+        except AttributeError as err:
+            raise RuntimeError(
+                "KubernetesJob did not return the expected pooled HostMesh "
+                f"'{pooled_mesh_name}'."
+            ) from err
+        job_state = build_kubernetes_pooled_job_state(pooled_host_mesh, meshes)
 
         logger.info("KubernetesLauncher initialization complete.")
         return job, job_state
