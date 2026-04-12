@@ -25,6 +25,7 @@ dependencies = [
     "omegaconf",
     "wandb",
     "hf_transfer",
+    "kubernetes",
     "six",
     "setuptools<80",
 ]

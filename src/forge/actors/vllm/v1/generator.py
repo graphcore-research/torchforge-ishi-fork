@@ -41,6 +41,7 @@ from vllm.entrypoints.llm import UsageContext
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -128,12 +129,24 @@ class Generator(ForgeActor):
         4. Pass host_mesh and GPU IDs to setup() - executor creates proc_mesh
         """
         engine_args = kwargs.get("engine_args", {})
+        # Detect if this is a remote launch or local host launch
+        num_hosts = cls.hosts if cls.hosts else None
         if isinstance(engine_args, Mapping):
             engine_args = EngineArgs(**engine_args)
-        vllm_config = engine_args.create_engine_config(UsageContext.LLM_CLASS)
+
+        original_device_type = current_platform.device_type
+        # Remote launch: controller is CPU only, so current_platform.device_type will default to empty string. 
+        # If this is a remote launch, assume GPUs are available and set device type to "cuda" 
+        # This is a fix to use cuda semantics for the generator
+        if num_hosts and not original_device_type:
+            current_platform.device_type = "cuda"
+        try:
+            vllm_config = engine_args.create_engine_config(UsageContext.LLM_CLASS)
+        finally:
+            # Restore the original device type to avoid side effects on the controller or other actors
+            current_platform.device_type = original_device_type
 
         num_gpus = vllm_config.parallel_config.world_size
-        num_hosts = cls.hosts if cls.hosts else None
         gpus_per_host = num_gpus // (num_hosts or 1)
         mesh_name = cls.mesh_name or "generator"
 
@@ -407,7 +420,7 @@ class Generator(ForgeActor):
         return completions
 
     @endpoint
-    async def stop(self):
+    async def stop_runtime(self):
         """Stop the generator and cleanup local resources.
 
         This method is idempotent and can be called multiple times safely.
@@ -427,7 +440,7 @@ class Generator(ForgeActor):
             logger.info("AsyncLLM.shutdown() returned")
             self.llm = None
 
-        logger.info("stop() complete")
+        logger.info("stop_runtime() complete")
 
     @classmethod
     async def shutdown(cls, actor):
@@ -439,9 +452,9 @@ class Generator(ForgeActor):
         2. Stop generator_proc
         """
         try:
-            await actor.stop.call()
+            await actor.stop_runtime.call()
         except Exception as e:
-            logger.warning(f"Error during actor.stop: {e}")
+            logger.warning(f"Error during actor.stop_runtime: {e}")
 
         try:
             if getattr(actor, "_generator_proc", None):

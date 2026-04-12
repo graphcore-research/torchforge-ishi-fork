@@ -25,7 +25,7 @@ from monarch.actor import (
     shutdown_context,
     this_host,
 )
-from monarch.utils import setup_env_for_distributed
+from monarch.spmd import setup_torch_elastic_env_async
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -280,6 +280,22 @@ class Provisioner:
 
         return host_mesh
 
+    async def _ensure_remote_host_registered(
+        self, host_mesh: HostMesh
+    ) -> tuple[uuid.UUID, GpuManager]:
+        """Register GPU bookkeeping for a remote host mesh if needed."""
+        host_id = getattr(host_mesh, "_host_id", None)
+        gpu_manager = self._host_gpu_map.get(host_id) if host_id is not None else None
+        if host_id is not None and gpu_manager is not None:
+            return host_id, gpu_manager
+
+        remote_gpu_count = await get_host_gpus(host_mesh)
+        host_id = uuid.uuid1()
+        gpu_manager = GpuManager(max_device_count=remote_gpu_count)
+        self._host_gpu_map[host_id] = gpu_manager
+        host_mesh._host_id = host_id
+        return host_id, gpu_manager
+
     async def get_proc_mesh(
         self,
         num_procs: int,
@@ -330,15 +346,7 @@ class Provisioner:
                     host_mesh = await self.get_host_mesh(
                         name=mesh_name,
                     )
-                    host_id = uuid.uuid1()
-                    # Get the GPU count from the remote host
-                    remote_gpu_count = await get_host_gpus(host_mesh)
-                    gpu_manager = GpuManager(max_device_count=remote_gpu_count)
-                    self._host_gpu_map[host_id] = gpu_manager
-                    host_mesh._host_id = host_id
-                else:
-                    host_id = host_mesh._host_id
-                    gpu_manager = self._host_gpu_map[host_id]
+                _, gpu_manager = await self._ensure_remote_host_registered(host_mesh)
             else:
                 # fallback to local
                 host_mesh = this_host()
@@ -374,7 +382,7 @@ class Provisioner:
 
             # Set up PyTorch distributed environment if using GPUs
             if with_gpus:
-                await setup_env_for_distributed(
+                await setup_torch_elastic_env_async(
                     procs,
                     master_addr=addr,
                     master_port=int(port),
@@ -428,8 +436,17 @@ class Provisioner:
             RuntimeError: If not enough GPUs available
         """
         async with self._lock:
-            host_id = getattr(host_mesh, "_host_id", None) or self._this_host_id
-            gpu_manager = self._host_gpu_map.get(host_id)
+            host_id = getattr(host_mesh, "_host_id", None)
+            gpu_manager = self._host_gpu_map.get(host_id) if host_id is not None else None
+
+            if gpu_manager is None:
+                if self.launcher is not None and host_id != self._this_host_id:
+                    _, gpu_manager = await self._ensure_remote_host_registered(
+                        host_mesh
+                    )
+                else:
+                    host_id = self._this_host_id
+                    gpu_manager = self._host_gpu_map.get(host_id)
 
             if gpu_manager is None:
                 raise RuntimeError(f"No GPU manager found for host {host_id}")

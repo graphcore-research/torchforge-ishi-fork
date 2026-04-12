@@ -6,15 +6,18 @@
 
 """Launcher specific logic (i.e. SLURM, k8s when supported, etc.)"""
 
+from __future__ import annotations
+
 import atexit
 import logging
 import os
 import shlex
 import textwrap
+from typing import Any
 
+from kubernetes import client
 from forge.controller.base import BaseLauncher
 from forge.types import Launcher, LauncherConfig
-from kubernetes import client
 from monarch.actor import ProcMesh
 from monarch.job import JobState, JobTrait, SlurmJob
 from monarch.job.kubernetes import KubernetesJob
@@ -82,12 +85,15 @@ def build_kubernetes_worker_pod_spec(
     image: str,
     gpus_per_node: int,
     gc_user: str,
-) -> client.V1PodSpec:
+) -> Any:
     worker_command = textwrap.dedent(
         f"""\
         set -euo pipefail
         export PIP_CONSTRAINT=""
         export USER="root"
+        set -a
+        source "/newdata/$GC_USER/.env"
+        set +a
         export UV_CACHE_DIR="/newdata/$GC_USER/.cache/uv"
         export PIP_CACHE_DIR="/newdata/$GC_USER/.cache/pip"
         export UV_PROJECT_ENVIRONMENT="/tmp/ishikori-worker-venv"
@@ -120,6 +126,12 @@ def build_kubernetes_worker_pod_spec(
                     ),
                     client.V1EnvVar(name="GC_USER", value=gc_user),
                 ],
+                readiness_probe=client.V1Probe(
+                    tcp_socket=client.V1TCPSocketAction(port=DEFAULT_MONARCH_PORT),
+                    period_seconds=4,
+                    timeout_seconds=2,
+                    failure_threshold=60,
+                ),
                 resources=client.V1ResourceRequirements(
                     requests=gpu_resources,
                     limits=gpu_resources,
