@@ -121,12 +121,12 @@ def build_kubernetes_worker_pod_spec(
         export PIP_CONSTRAINT=""
         export USER="root"
         set -a
-        source "/newdata/$GC_USER/.env"
+        source "/data/$GC_USER/.env"
         set +a
-        export UV_CACHE_DIR="/newdata/$GC_USER/.cache/uv"
-        export PIP_CACHE_DIR="/newdata/$GC_USER/.cache/pip"
+        export UV_CACHE_DIR="/data/$GC_USER/.cache/uv"
+        export PIP_CACHE_DIR="/data/$GC_USER/.cache/pip"
         export UV_PROJECT_ENVIRONMENT="/tmp/ishikori-worker-venv"
-        cd "/newdata/$GC_USER/ishikori"
+        cd "/data/$GC_USER/ishikori"
         python -m pip install uv
         uv sync --frozen
         exec uv run python -u -c {shlex.quote(_WORKER_LOOP_SCRIPT)}
@@ -166,15 +166,15 @@ def build_kubernetes_worker_pod_spec(
                     limits=gpu_resources,
                 ),
                 volume_mounts=[
-                    client.V1VolumeMount(name="newdata", mount_path="/newdata"),
+                    client.V1VolumeMount(name="data", mount_path="/data"),
                     client.V1VolumeMount(name="devshm", mount_path="/dev/shm"),
                 ],
             )
         ],
         volumes=[
             client.V1Volume(
-                name="newdata",
-                host_path=client.V1HostPathVolumeSource(path="/newdata"),
+                name="data",
+                host_path=client.V1HostPathVolumeSource(path="/data"),
             ),
             client.V1Volume(
                 name="devshm",
