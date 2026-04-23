@@ -174,7 +174,7 @@ def build_kubernetes_worker_pod_spec(
         volumes=[
             client.V1Volume(
                 name="data",
-                host_path=client.V1HostPathVolumeSource(path="/data"),
+                host_path=client.V1HostPathVolumeSource(path="/newdata"),
             ),
             client.V1Volume(
                 name="devshm",
