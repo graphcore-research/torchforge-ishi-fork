@@ -4,19 +4,40 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import logging
 import random
 from collections import deque
 from dataclasses import dataclass
 from operator import itemgetter
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from forge.controller import ForgeActor
 from forge.observability.metrics import record_metric, Reduce
 from monarch.actor import endpoint
 
+if TYPE_CHECKING:
+    from forge.rl.types import Episode
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_nonzero_advantage(episode: "Episode", eps: float = 1e-6) -> bool:
+    advantage = _as_float(getattr(episode, "advantage", None))
+    return advantage is not None and abs(advantage) > eps
 
 
 @dataclass
@@ -115,6 +136,8 @@ class ReplayBuffer(ForgeActor):
             entry.sample_count += 1
             sampled_episodes.append(entry.data)
 
+        self._record_sample_advantage_metrics(sampled_episodes)
+
         # Calculate and record policy age metrics for sampled episodes
         sampled_policy_ages = [
             curr_policy_version - ep.policy_version for ep in sampled_episodes
@@ -151,21 +174,111 @@ class ReplayBuffer(ForgeActor):
 
     def _evict(self, curr_policy_version):
         buffer_len_before_evict = len(self.buffer)
+        max_samples = (
+            None if self.max_resample_count is None else self.max_resample_count + 1
+        )
+        self._record_pending_eviction_reasons(curr_policy_version, max_samples)
         indices = self.eviction_policy(
             self.buffer,
             curr_policy_version,
-            self.max_resample_count + 1,
+            max_samples,
             self.max_policy_age,
         )
-        self.buffer = deque(self._collect(indices))
+        kept_indices = set(indices)
+        evicted_nonzero_advantage_count = sum(
+            _has_nonzero_advantage(entry.data)
+            for i, entry in enumerate(self.buffer)
+            if i not in kept_indices
+        )
+        self.buffer = deque(self._collect(indices), maxlen=self.max_buffer_size)
 
         evicted_count = buffer_len_before_evict - len(self.buffer)
         record_metric("buffer/evict/sum_episodes_evicted", evicted_count, Reduce.SUM)
+        record_metric(
+            "learning/replay/evicted_nonzero_advantage_episodes",
+            evicted_nonzero_advantage_count,
+            Reduce.SUM,
+        )
 
         logger.debug(
             f"maximum policy age: {self.max_policy_age}, current policy version: {curr_policy_version}, "
             f"{evicted_count} episodes expired, {len(self.buffer)} episodes left"
         )
+
+    def _record_sample_advantage_metrics(self, sampled_episodes) -> None:
+        advantages = [
+            advantage
+            for advantage in (
+                _as_float(getattr(episode, "advantage", None))
+                for episode in sampled_episodes
+            )
+            if advantage is not None
+        ]
+        if not advantages:
+            return
+
+        zero_count = sum(1 for advantage in advantages if abs(advantage) < 1e-12)
+        nonzero_count = len(advantages) - zero_count
+        record_metric("buffer/sample/count_zero_advantage", zero_count, Reduce.SUM)
+        record_metric(
+            "buffer/sample/count_nonzero_advantage", nonzero_count, Reduce.SUM
+        )
+        record_metric(
+            "buffer/sample/frac_zero_advantage",
+            zero_count / len(advantages),
+            Reduce.MEAN,
+        )
+        record_metric(
+            "buffer/sample/avg_abs_advantage",
+            sum(abs(advantage) for advantage in advantages) / len(advantages),
+            Reduce.MEAN,
+        )
+        record_metric(
+            "learning/replay/sampled_episodes",
+            len(sampled_episodes),
+            Reduce.SUM,
+        )
+        record_metric(
+            "learning/replay/sampled_nonzero_advantage_episodes",
+            nonzero_count,
+            Reduce.SUM,
+        )
+        record_metric(
+            "learning/replay/sampled_nonzero_advantage_fraction",
+            nonzero_count / max(len(advantages), 1),
+            Reduce.MEAN,
+        )
+
+    def _record_pending_eviction_reasons(
+        self,
+        curr_policy_version: int,
+        max_samples: int | None,
+    ) -> None:
+        age_count = 0
+        resample_count = 0
+        either_count = 0
+        for entry in self.buffer:
+            policy_version = getattr(entry.data, "policy_version", None)
+            age_expired = (
+                self.max_policy_age is not None
+                and policy_version is not None
+                and curr_policy_version - policy_version > self.max_policy_age
+            )
+            resample_expired = (
+                max_samples is not None and entry.sample_count >= max_samples
+            )
+            if age_expired:
+                age_count += 1
+            if resample_expired:
+                resample_count += 1
+            if age_expired or resample_expired:
+                either_count += 1
+
+        record_metric("buffer/evict/pending_age_expired", age_count, Reduce.SUM)
+        record_metric(
+            "buffer/evict/pending_resample_expired", resample_count, Reduce.SUM
+        )
+        record_metric("buffer/evict/pending_total_expired", either_count, Reduce.SUM)
 
     def _collect(self, indices: list[int]):
         """Efficiently traverse deque and collect elements at each requested index"""

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
-from forge.actors.replay_buffer import ReplayBuffer
+from forge.actors.replay_buffer import BufferEntry, ReplayBuffer
 
 
 @dataclass
@@ -152,3 +152,19 @@ class TestReplayBuffer:
         values = local_rb._collect([1, 3])
         assert values == [2, 4]
         assert local_rb.buffer[0] == 1
+
+    @pytest.mark.asyncio
+    async def test_evict_preserves_max_buffer_size(self) -> None:
+        """Bounded replay should stay bounded after explicit eviction."""
+        local_rb = ReplayBuffer(batch_size=1, max_buffer_size=2)
+        await local_rb.setup._method(local_rb)
+
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0)))
+        await local_rb.evict._method(local_rb, curr_policy_version=0)
+
+        assert local_rb.buffer.maxlen == 2
+
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0)))
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0)))
+        assert local_rb.buffer.maxlen == 2
+        assert len(local_rb.buffer) == 2

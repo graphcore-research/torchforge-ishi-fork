@@ -19,7 +19,7 @@ from forge.controller import ForgeActor
 from forge.data.utils import batch_to_device
 from forge.observability.metrics import record_metric, Reduce
 from forge.observability.perf_tracker import Tracer
-from forge.rl.loss import create_shifted_targets
+from forge.rl.loss import compute_logprobs, create_shifted_targets, masked_mean
 from forge.types import TrainBatch
 from monarch.actor import endpoint
 from torch import Tensor
@@ -84,6 +84,7 @@ class TitanTrainer(ForgeActor):
     # Non JobConfig-related fields
     loss: Callable = lambda logits, **targets: logits
     state_dict_key: str = "model_state_dict"
+    recompute_generator_logprobs: bool = False
 
     def __post_init__(self):
         super().__init__()
@@ -111,12 +112,128 @@ class TitanTrainer(ForgeActor):
         engine_config = {f.name: getattr(self, f.name) for f in fields(self)}
         for key in {
             "loss",
+            "recompute_generator_logprobs",
             "state_dict_key",
         }:
             engine_config.pop(key)  # Not part of job config
         self.engine = ForgeEngine(ForgeJobConfig(**engine_config))
         self.engine.checkpointer.load(step=self.step)
         self.engine.optimizers.zero_grad()
+
+    def _replace_generator_logprobs_with_trainer_context(
+        self,
+        logits: torch.Tensor,
+        loss_inputs: dict,
+    ) -> None:
+        """Use trainer-context old logprobs as the PPO/GRPO denominator.
+
+        vLLM can report sampled-token logprobs in a subtly different probability
+        space from the trainer model. TRL avoids using those sampled logprobs as
+        the canonical old-policy denominator by recomputing old logprobs with the
+        trainer model under the same tokenization, masks, and positions used for
+        optimization. This helper mirrors that behavior while logging the gap to
+        the sampled logprobs as a canary.
+        """
+        target_ids = loss_inputs["target_ids"]
+        sampled_logprobs = loss_inputs.get("generator_logprobs")
+        trainer_logprobs, _ = compute_logprobs(logits.detach(), target_ids)
+
+        if sampled_logprobs is not None:
+            loss_mask = loss_inputs.get("loss_mask")
+            if loss_mask is None:
+                loss_mask = torch.ones_like(trainer_logprobs)
+            with torch.no_grad():
+                delta = trainer_logprobs - sampled_logprobs
+                record_metric(
+                    "old_logprobs/trainer_minus_sampler/mean",
+                    masked_mean(delta, loss_mask),
+                    Reduce.MEAN,
+                )
+                record_metric(
+                    "old_logprobs/trainer_minus_sampler/abs_mean",
+                    masked_mean(delta.abs(), loss_mask),
+                    Reduce.MEAN,
+                )
+                record_metric(
+                    "old_logprobs/trainer_over_sampler_ratio/mean",
+                    masked_mean(torch.exp(delta.clamp(min=-50.0, max=50.0)), loss_mask),
+                    Reduce.MEAN,
+                )
+
+        loss_inputs["generator_logprobs"] = trainer_logprobs.detach()
+
+    def _record_batch_signal_metrics(self, batch: TrainBatch) -> None:
+        loss_mask = batch.loss_inputs.get("loss_mask")
+        advantages = batch.loss_inputs.get("advantages")
+        if advantages is None:
+            return
+
+        with torch.no_grad():
+            if loss_mask is None:
+                active_mask = torch.ones_like(advantages, dtype=torch.bool)
+            else:
+                active_mask = loss_mask.to(dtype=torch.bool)
+            nonzero_advantage_mask = advantages.abs() > 1e-6
+            active_token_count = int(active_mask.sum().item())
+            nonzero_advantage_token_count = int(
+                (active_mask & nonzero_advantage_mask).sum().item()
+            )
+
+        record_metric(
+            "learning/trainer/active_tokens",
+            active_token_count,
+            Reduce.SUM,
+        )
+        record_metric(
+            "learning/trainer/nonzero_advantage_tokens",
+            nonzero_advantage_token_count,
+            Reduce.SUM,
+        )
+        record_metric(
+            "learning/trainer/nonzero_advantage_token_fraction",
+            nonzero_advantage_token_count / max(active_token_count, 1),
+            Reduce.MEAN,
+        )
+        record_metric(
+            "learning/trainer/batch_has_nonzero_advantage",
+            int(nonzero_advantage_token_count > 0),
+            Reduce.SUM,
+        )
+
+    def _record_gradient_signal_metrics(self, max_parameters: int = 16) -> None:
+        with torch.no_grad():
+            squared_norm = torch.zeros((), device=self.engine.device)
+            parameter_count = 0
+            for model_part in self.engine.model_parts:
+                for parameter in model_part.parameters():
+                    if not parameter.requires_grad or parameter.grad is None:
+                        continue
+                    grad = parameter.grad.detach()
+                    if getattr(grad, "is_sparse", False):
+                        grad = grad.coalesce().values()
+                    squared_norm = squared_norm + grad.float().pow(2).sum()
+                    parameter_count += 1
+                    if parameter_count >= max_parameters:
+                        break
+                if parameter_count >= max_parameters:
+                    break
+            grad_norm = float(torch.sqrt(squared_norm).item())
+
+        record_metric(
+            "learning/trainer/selected_grad_norm",
+            grad_norm,
+            Reduce.MEAN,
+        )
+        record_metric(
+            "learning/trainer/nonzero_gradient_step",
+            int(grad_norm > 0.0),
+            Reduce.SUM,
+        )
+        record_metric(
+            "learning/trainer/selected_grad_parameter_count",
+            parameter_count,
+            Reduce.MEAN,
+        )
 
     def forward_backward(self, batch: TrainBatch) -> Tensor:
         model_parts = self.engine.model_parts
@@ -136,6 +253,11 @@ class TitanTrainer(ForgeActor):
                 assert len(model_parts) == 1
                 with self.engine.maybe_enable_amp:
                     logits = model_parts[0](**batch.model_inputs)
+                    if self.recompute_generator_logprobs:
+                        self._replace_generator_logprobs_with_trainer_context(
+                            logits,
+                            batch.loss_inputs,
+                        )
                     loss_output = self.loss(logits, **batch.loss_inputs)
                     loss = loss_output.loss
 
@@ -151,6 +273,7 @@ class TitanTrainer(ForgeActor):
                 # Free to before bwd to avoid peaking memory
                 del logits, loss_output.metrics
                 loss.backward()
+                self._record_gradient_signal_metrics()
         self._accumulated_microbatches += 1
         return loss
 
@@ -163,6 +286,7 @@ class TitanTrainer(ForgeActor):
         batch = batches[self.engine.dp_rank]
         batch_to_device(batch.model_inputs, self.engine.device)
         batch_to_device(batch.loss_inputs, self.engine.device)
+        self._record_batch_signal_metrics(batch)
 
         loss = self.forward_backward(batch)
         torch.distributed.all_reduce(loss)
