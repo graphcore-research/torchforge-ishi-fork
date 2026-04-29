@@ -43,11 +43,27 @@ class Episode:
         return tensor
 
     @property
+    def request_attention_mask(self) -> torch.Tensor:
+        tensor = torch.ones_like(self.completion.prompt_ids, dtype=torch.bool)
+        if tensor.shape[0] < self.request_len:  # left pad
+            diff = self.request_len - tensor.shape[0]
+            tensor = F.pad(tensor, (diff, 0), value=False)
+        return tensor
+
+    @property
     def response_tensor(self) -> torch.Tensor:
         tensor: torch.Tensor = self.completion.token_ids.to(torch.long)
         if tensor.shape[0] < self.response_len:  # right pad
             diff = self.response_len - tensor.shape[0]
             tensor = F.pad(tensor, (0, diff), value=self.pad_id)
+        return tensor
+
+    @property
+    def response_attention_mask(self) -> torch.Tensor:
+        tensor = torch.ones_like(self.completion.token_ids, dtype=torch.bool)
+        if tensor.shape[0] < self.response_len:  # right pad
+            diff = self.response_len - tensor.shape[0]
+            tensor = F.pad(tensor, (0, diff), value=False)
         return tensor
 
     def to_dict(self, exclude: list[str] | None = None) -> dict[str, Any]:

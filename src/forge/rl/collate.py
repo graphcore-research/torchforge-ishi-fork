@@ -9,7 +9,32 @@ from forge.rl.types import Group
 from forge.types import TrainBatch
 
 
-def collate(batches: list[Group]) -> list[TrainBatch]:
+def _make_causal_padding_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    """Build a causal attention mask that hides pad keys from real tokens."""
+    batch_size, seq_len = attention_mask.shape
+    causal = torch.tril(
+        torch.ones(seq_len, seq_len, dtype=torch.bool, device=attention_mask.device)
+    )
+    key_mask = attention_mask[:, None, None, :]
+    causal_padding_mask = causal[None, None, :, :] & key_mask
+
+    # Pad-token query rows are ignored by the RL loss, but SDPA should still see
+    # at least one valid key to avoid undefined all-masked rows.
+    query_is_pad = ~attention_mask
+    self_mask = torch.eye(seq_len, dtype=torch.bool, device=attention_mask.device)
+    pad_query_self_mask = query_is_pad[:, None, :, None] & self_mask[None, None, :, :]
+    return causal_padding_mask | pad_query_self_mask
+
+
+def _make_positions(attention_mask: torch.Tensor) -> torch.Tensor:
+    """Assign RoPE positions as if pad tokens were stripped before scoring."""
+    positions = torch.cumsum(attention_mask.to(torch.long), dim=1) - 1
+    return positions.clamp_min_(0)
+
+
+def collate(
+    batches: list[Group], *, include_padding_metadata: bool = False
+) -> list[TrainBatch]:
     """
     Collates a list of batches into TrainBatch objects.
     Each batch is a list of episodes, and each episode is a dict of tensors.
@@ -24,6 +49,20 @@ def collate(batches: list[Group]) -> list[TrainBatch]:
 
         input_ids = torch.cat([request, response], dim=1)
         seq_len = input_ids.shape[1]
+        model_inputs = {"tokens": input_ids}
+
+        if include_padding_metadata:
+            request_attention_mask = torch.stack(
+                [e.request_attention_mask for e in batch]
+            )
+            response_attention_mask = torch.stack(
+                [e.response_attention_mask for e in batch]
+            )
+            attention_mask = torch.cat(
+                [request_attention_mask, response_attention_mask], dim=1
+            )
+            model_inputs["attention_masks"] = _make_causal_padding_mask(attention_mask)
+            model_inputs["positions"] = _make_positions(attention_mask)
 
         # ref_logprobs is optional - only stack if all episodes have it
         ref_logprobs = None
@@ -47,8 +86,12 @@ def collate(batches: list[Group]) -> list[TrainBatch]:
 
         result.append(
             TrainBatch(
-                model_inputs={"tokens": input_ids},
+                model_inputs=model_inputs,
                 loss_inputs=loss_inputs,
             )
         )
     return result
+
+
+def collate_with_padding_metadata(batches: list[Group]) -> list[TrainBatch]:
+    return collate(batches, include_padding_metadata=True)
