@@ -15,6 +15,7 @@ import torch
 from forge.controller import ForgeActor
 from forge.observability.metrics import record_metric, Reduce
 from forge.observability.perf_tracker import Tracer
+from forge.rl.collate import make_padding_metadata
 from forge.rl.loss import compute_logprobs, create_shifted_targets
 from monarch.actor import current_rank, current_size, endpoint
 from torch.distributed.tensor import DTensor
@@ -127,12 +128,17 @@ class ReferenceModel(ForgeActor):
 
     @endpoint
     async def forward(
-        self, input_ids: torch.Tensor, return_logprobs: bool = True
+        self,
+        input_ids: torch.Tensor,
+        return_logprobs: bool = True,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
             input_ids (torch.Tensor): input token ids with shape [group_size, seq_len].
             return_logprobs (bool): whether to return log probabilities instead of raw logits.
+            attention_mask (torch.Tensor | None): optional 2D full-sequence mask where
+              real prompt/completion tokens are True and padding tokens are False.
 
             return_logprobs flag significantly impacts the amount of data transferred to the caller:
             - When False: Returns logits with shape [group_size, seq_len, vocab_size].
@@ -147,9 +153,10 @@ class ReferenceModel(ForgeActor):
         t.start()
         self.engine.gc_handler.run(self.step)
 
-        model_parts = self.engine.model_parts
-        parallel_dims = self.engine.parallel_dims
         input_ids = input_ids.to("cuda")
+        model_inputs = {"tokens": input_ids}
+        if attention_mask is not None:
+            model_inputs.update(make_padding_metadata(attention_mask.to("cuda")))
 
         # optional_context_parallel_ctx = (
         #     dist_utils.create_context_parallel_ctx(
@@ -170,7 +177,7 @@ class ReferenceModel(ForgeActor):
             with self.engine.train_context(optional_context_parallel_ctx):
                 with self.engine.maybe_enable_amp:
                     with torch.inference_mode():
-                        logits = self.model(input_ids)
+                        logits = self.model(**model_inputs)
 
                         if return_logprobs:
                             target_ids = create_shifted_targets(input_ids)

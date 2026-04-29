@@ -32,6 +32,14 @@ def _make_positions(attention_mask: torch.Tensor) -> torch.Tensor:
     return positions.clamp_min_(0)
 
 
+def make_padding_metadata(attention_mask: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Build TorchTitan model kwargs for scoring left-padded RL sequences."""
+    return {
+        "attention_masks": _make_causal_padding_mask(attention_mask),
+        "positions": _make_positions(attention_mask),
+    }
+
+
 def collate(
     batches: list[Group], *, include_padding_metadata: bool = False
 ) -> list[TrainBatch]:
@@ -61,8 +69,7 @@ def collate(
             attention_mask = torch.cat(
                 [request_attention_mask, response_attention_mask], dim=1
             )
-            model_inputs["attention_masks"] = _make_causal_padding_mask(attention_mask)
-            model_inputs["positions"] = _make_positions(attention_mask)
+            model_inputs.update(make_padding_metadata(attention_mask))
 
         # ref_logprobs is optional - only stack if all episodes have it
         ref_logprobs = None
