@@ -77,6 +77,8 @@ class ReplayBuffer(ForgeActor):
     max_buffer_size: int | None = None
     max_resample_count: int | None = 0
     seed: int | None = None
+    sample_nonzero_advantage_only: bool = False
+    advantage_epsilon: float = 1e-6
     collate: Callable = lambda batch: batch
     eviction_policy: Callable = age_evict
     sample_policy: Callable = random_sample
@@ -92,6 +94,11 @@ class ReplayBuffer(ForgeActor):
     async def add(self, episode: "Episode") -> None:
         self.buffer.append(BufferEntry(episode))
         record_metric("buffer/add/count_episodes_added", 1, Reduce.SUM)
+        record_metric(
+            "learning/replay/added_nonzero_advantage_episodes",
+            int(_has_nonzero_advantage(episode, self.advantage_epsilon)),
+            Reduce.SUM,
+        )
 
     @endpoint
     async def sample(
@@ -126,9 +133,29 @@ class ReplayBuffer(ForgeActor):
             )
 
         # TODO: prefetch samples in advance
-        sampled_indices = self.sample_policy(
-            self.buffer, total_samples, curr_policy_version
-        )
+        if self.sample_nonzero_advantage_only:
+            eligible_indices = [
+                index
+                for index, entry in enumerate(self.buffer)
+                if _has_nonzero_advantage(entry.data, self.advantage_epsilon)
+            ]
+            record_metric(
+                "learning/replay/nonzero_advantage_eligible_episodes",
+                len(eligible_indices),
+                Reduce.MEAN,
+            )
+            record_metric(
+                "learning/replay/nonzero_advantage_eligible_fraction",
+                len(eligible_indices) / max(len(self.buffer), 1),
+                Reduce.MEAN,
+            )
+            if total_samples > len(eligible_indices):
+                return None
+            sampled_indices = random.sample(eligible_indices, k=total_samples)
+        else:
+            sampled_indices = self.sample_policy(
+                self.buffer, total_samples, curr_policy_version
+            )
         if sampled_indices is None:
             return None
         sampled_episodes = []
@@ -186,7 +213,7 @@ class ReplayBuffer(ForgeActor):
         )
         kept_indices = set(indices)
         evicted_nonzero_advantage_count = sum(
-            _has_nonzero_advantage(entry.data)
+            _has_nonzero_advantage(entry.data, self.advantage_epsilon)
             for i, entry in enumerate(self.buffer)
             if i not in kept_indices
         )

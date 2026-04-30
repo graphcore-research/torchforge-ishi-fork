@@ -25,6 +25,7 @@ class TestEpisode:
     """
 
     policy_version: int
+    advantage: float | None = None
 
 
 class TestReplayBuffer:
@@ -168,3 +169,43 @@ class TestReplayBuffer:
         local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0)))
         assert local_rb.buffer.maxlen == 2
         assert len(local_rb.buffer) == 2
+
+    @pytest.mark.asyncio
+    async def test_sample_nonzero_advantage_only(self) -> None:
+        """Optional GRPO guard samples only episodes with useful advantage."""
+        local_rb = ReplayBuffer(
+            batch_size=2,
+            max_policy_age=1,
+            sample_nonzero_advantage_only=True,
+            seed=1,
+        )
+        await local_rb.setup._method(local_rb)
+
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0, advantage=0.0)))
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0, advantage=1.0)))
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0, advantage=-1.0)))
+
+        samples = await local_rb.sample._method(local_rb, curr_policy_version=0)
+
+        assert samples is not None
+        assert len(samples[0]) == 2
+        assert all(abs(sample.advantage) > 0 for sample in samples[0])
+
+    @pytest.mark.asyncio
+    async def test_sample_nonzero_advantage_only_waits_when_insufficient(
+        self,
+    ) -> None:
+        local_rb = ReplayBuffer(
+            batch_size=2,
+            max_policy_age=1,
+            sample_nonzero_advantage_only=True,
+            seed=1,
+        )
+        await local_rb.setup._method(local_rb)
+
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0, advantage=0.0)))
+        local_rb.buffer.append(BufferEntry(TestEpisode(policy_version=0, advantage=1.0)))
+
+        samples = await local_rb.sample._method(local_rb, curr_policy_version=0)
+
+        assert samples is None
