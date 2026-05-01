@@ -151,7 +151,15 @@ class ReplayBuffer(ForgeActor):
             )
             if total_samples > len(eligible_indices):
                 return None
-            sampled_indices = random.sample(eligible_indices, k=total_samples)
+            eligible_buffer = deque(self.buffer[index] for index in eligible_indices)
+            eligible_sampled_indices = self.sample_policy(
+                eligible_buffer, total_samples, curr_policy_version
+            )
+            if eligible_sampled_indices is None:
+                return None
+            sampled_indices = [
+                eligible_indices[index] for index in eligible_sampled_indices
+            ]
         else:
             sampled_indices = self.sample_policy(
                 self.buffer, total_samples, curr_policy_version
