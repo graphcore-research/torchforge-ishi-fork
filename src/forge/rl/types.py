@@ -41,8 +41,6 @@ class Episode:
     validity_class: str | None = None
     advantage_sign: str | None = None
     proposal_origin: str | None = None
-    reference_support_token_ids: torch.Tensor | None = None  # [seq_len, top_k]
-    reference_support_probs: torch.Tensor | None = None  # [seq_len, top_k]
     loss_mask: torch.Tensor | None = None
 
     @property

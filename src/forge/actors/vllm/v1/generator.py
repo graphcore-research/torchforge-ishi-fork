@@ -429,9 +429,8 @@ class Generator(ForgeActor):
     ) -> list[Completion]:
         """Score exact token completions under the current generator policy.
 
-        This is a diagnostic proposal path for tiny finite-action tasks. It
-        avoids synthetic oracle logprobs by asking vLLM for prompt logprobs on
-        the exact ``[prompt_ids + completion_ids]`` sequence.
+        This path scores exact proposal completions by asking vLLM for prompt
+        logprobs on the exact ``[prompt_ids + completion_ids]`` sequence.
         """
         t = Tracer("generator_perf/score_token_completions", timer="gpu")
         t.start()

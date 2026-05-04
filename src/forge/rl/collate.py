@@ -91,16 +91,6 @@ def collate(
         if ref_logprobs is not None:
             loss_inputs["ref_logprobs"] = ref_logprobs
 
-        if all(e.reference_support_token_ids is not None for e in batch) and all(
-            e.reference_support_probs is not None for e in batch
-        ):
-            loss_inputs["reference_support_token_ids"] = torch.stack(
-                [e.reference_support_token_ids for e in batch]
-            )
-            loss_inputs["reference_support_probs"] = torch.stack(
-                [e.reference_support_probs for e in batch]
-            )
-
         result.append(
             TrainBatch(
                 model_inputs=model_inputs,

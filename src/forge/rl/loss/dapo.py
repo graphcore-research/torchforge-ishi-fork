@@ -16,7 +16,6 @@ from forge.rl.loss.ops import (
     masked_mean,
     pg_ppo_clip,
 )
-from forge.rl.loss.grpo import compute_reference_support_floor
 from forge.rl.loss.types import AggType, BaseLossConfig, LossOutput
 from pydantic import Field
 
@@ -105,10 +104,6 @@ class DAPOLoss(BaseLossConfig):
     clip_low: Annotated[float, Field(ge=0, le=1)] = 0.2
     clip_high: Annotated[float, Field(ge=0, le=1)] = 0.28
     dual_clip_c: Annotated[float, Field(ge=1)] = 3.0
-    reference_support_floor_coef: Annotated[float, Field(ge=0)] = 0.0
-    reference_support_alpha: Annotated[float, Field(ge=0, le=1)] = 0.2
-    reference_support_top_k: Annotated[int, Field(ge=1)] = 8
-    reference_support_eps: Annotated[float, Field(gt=0)] = 1e-8
     agg_type: AggType = "token_mean"
 
     def __call__(
@@ -119,8 +114,6 @@ class DAPOLoss(BaseLossConfig):
         generator_logprobs: torch.Tensor,  # (B, S)
         loss_mask: torch.Tensor,  # (B, S)
         loss_scale: torch.Tensor | None = None,
-        reference_support_token_ids: torch.Tensor | None = None,
-        reference_support_probs: torch.Tensor | None = None,
     ) -> LossOutput:
         logprobs, lp_m = compute_logprobs(logits, target_ids)
         entropy, ent_m = compute_entropy(logits, loss_mask)
@@ -132,25 +125,5 @@ class DAPOLoss(BaseLossConfig):
         )
         pg_loss, dual_m = pg_dual_clip(pg_loss, advantages, loss_mask, self.dual_clip_c)
         loss, agg_m = aggregate(pg_loss, loss_mask, self.agg_type, loss_scale)
-        reference_support_loss, reference_support_m = compute_reference_support_floor(
-            logits,
-            reference_support_token_ids,
-            reference_support_probs,
-            loss_mask,
-            coef=self.reference_support_floor_coef,
-            alpha=self.reference_support_alpha,
-            eps=self.reference_support_eps,
-        )
-        if reference_support_loss is not None:
-            loss = loss + reference_support_loss
 
-        return LossOutput(
-            loss,
-            lp_m
-            + ent_m
-            + ratio_m
-            + clip_m
-            + dual_m
-            + reference_support_m
-            + agg_m,
-        )
+        return LossOutput(loss, lp_m + ent_m + ratio_m + clip_m + dual_m + agg_m)
