@@ -26,6 +26,17 @@ class TestEpisode:
 
     policy_version: int
     advantage: float | None = None
+    reward: float | None = None
+    loss_priority: float | None = None
+    group_id: str | None = None
+    rollout_group_size: int | None = None
+    slate_id: str | None = None
+    slate_size: int | None = None
+    slate_rank: int | None = None
+    slate_reward_rank: int | None = None
+    normalized_response: str | None = None
+    response_action: str | None = None
+    proposal_origin: str | None = None
 
 
 class TestReplayBuffer:
@@ -209,3 +220,134 @@ class TestReplayBuffer:
         samples = await local_rb.sample._method(local_rb, curr_policy_version=0)
 
         assert samples is None
+
+    @pytest.mark.asyncio
+    async def test_group_preserving_sampling_returns_intact_groups(self) -> None:
+        local_rb = ReplayBuffer(
+            batch_size=4,
+            max_policy_age=1,
+            group_preserving_sampling=True,
+            sample_nonzero_advantage_only=True,
+            seed=1,
+        )
+        await local_rb.setup._method(local_rb)
+
+        for group_id in ("a", "b"):
+            for advantage in (1.0, -1.0):
+                local_rb.buffer.append(
+                    BufferEntry(
+                        TestEpisode(
+                            policy_version=0,
+                            advantage=advantage,
+                            group_id=group_id,
+                            rollout_group_size=2,
+                        )
+                    )
+                )
+        local_rb.buffer.append(
+            BufferEntry(
+                TestEpisode(
+                    policy_version=0,
+                    advantage=1.0,
+                    group_id="partial",
+                    rollout_group_size=2,
+                )
+            )
+        )
+
+        samples = await local_rb.sample._method(local_rb, curr_policy_version=0)
+
+        assert samples is not None
+        assert len(samples[0]) == 4
+        sampled_group_ids = [sample.group_id for sample in samples[0]]
+        assert sampled_group_ids.count("a") == 2
+        assert sampled_group_ids.count("b") == 2
+        assert "partial" not in sampled_group_ids
+
+    @pytest.mark.asyncio
+    async def test_slate_contrast_coverage_selector_keeps_useful_cells(self) -> None:
+        local_rb = ReplayBuffer(
+            batch_size=4,
+            max_policy_age=1,
+            slate_preserving_sampling=True,
+            slate_subset_strategy="contrast_coverage",
+            seed=1,
+        )
+        await local_rb.setup._method(local_rb)
+
+        episodes = [
+            TestEpisode(
+                policy_version=0,
+                reward=3.0,
+                loss_priority=2.0,
+                slate_id="slate-a",
+                slate_size=6,
+                slate_rank=0,
+                slate_reward_rank=0,
+                response_action="0 0 0",
+                proposal_origin="grammar_candidate",
+            ),
+            TestEpisode(
+                policy_version=0,
+                reward=1.0,
+                loss_priority=0.1,
+                slate_id="slate-a",
+                slate_size=6,
+                slate_rank=1,
+                slate_reward_rank=3,
+                response_action="3 3 3",
+                proposal_origin="grammar_candidate",
+            ),
+            TestEpisode(
+                policy_version=0,
+                reward=2.0,
+                loss_priority=5.0,
+                slate_id="slate-a",
+                slate_size=6,
+                slate_rank=2,
+                slate_reward_rank=1,
+                response_action="0 0 1",
+                proposal_origin="grammar_candidate",
+            ),
+            TestEpisode(
+                policy_version=0,
+                reward=1.5,
+                loss_priority=2.0,
+                slate_id="slate-a",
+                slate_size=6,
+                slate_rank=3,
+                slate_reward_rank=2,
+                response_action="1 2 3",
+                proposal_origin="grammar_candidate",
+            ),
+            TestEpisode(
+                policy_version=0,
+                reward=0.0,
+                loss_priority=4.0,
+                slate_id="slate-a",
+                slate_size=6,
+                slate_rank=4,
+                slate_reward_rank=5,
+                response_action="2 2 2",
+                proposal_origin="grammar_candidate",
+            ),
+            TestEpisode(
+                policy_version=0,
+                reward=0.5,
+                loss_priority=3.0,
+                slate_id="slate-a",
+                slate_size=6,
+                slate_rank=5,
+                slate_reward_rank=4,
+                response_action="0 3 0",
+                proposal_origin="grammar_candidate",
+            ),
+        ]
+        for episode in episodes:
+            local_rb.buffer.append(BufferEntry(episode))
+
+        samples = await local_rb.sample._method(local_rb, curr_policy_version=0)
+
+        assert samples is not None
+        selected_actions = {sample.response_action for sample in samples[0]}
+        assert selected_actions == {"0 0 0", "3 3 3", "0 0 1", "1 2 3"}

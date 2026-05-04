@@ -203,10 +203,23 @@ def compute_ratio(
         raise ValueError(f"Unknown ratio_type: {ratio_type}")
 
     with torch.no_grad():
+        active_ratio = ratio[mask.bool()]
+        if active_ratio.numel() == 0:
+            active_ratio = torch.ones((), device=ratio.device, dtype=ratio.dtype)
         metrics = [
             Metric(
                 key="loss/ratio/mean",
                 value=masked_mean(ratio, mask),
+                reduction=Reduce.MEAN,
+            ),
+            Metric(
+                key="loss/ratio/min",
+                value=active_ratio.min(),
+                reduction=Reduce.MEAN,
+            ),
+            Metric(
+                key="loss/ratio/max",
+                value=active_ratio.max(),
                 reduction=Reduce.MEAN,
             ),
             Metric(

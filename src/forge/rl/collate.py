@@ -91,10 +91,32 @@ def collate(
         if ref_logprobs is not None:
             loss_inputs["ref_logprobs"] = ref_logprobs
 
+        if all(e.reference_support_token_ids is not None for e in batch) and all(
+            e.reference_support_probs is not None for e in batch
+        ):
+            loss_inputs["reference_support_token_ids"] = torch.stack(
+                [e.reference_support_token_ids for e in batch]
+            )
+            loss_inputs["reference_support_probs"] = torch.stack(
+                [e.reference_support_probs for e in batch]
+            )
+
         result.append(
             TrainBatch(
                 model_inputs=model_inputs,
                 loss_inputs=loss_inputs,
+                meta={
+                    "group_ids": [e.group_id for e in batch],
+                    "rollout_group_sizes": [e.rollout_group_size for e in batch],
+                    "slate_ids": [e.slate_id for e in batch],
+                    "slate_sizes": [e.slate_size for e in batch],
+                    "slate_ranks": [e.slate_rank for e in batch],
+                    "slate_reward_ranks": [e.slate_reward_rank for e in batch],
+                    "target_actions": [e.target_action for e in batch],
+                    "response_actions": [e.response_action for e in batch],
+                    "advantage_signs": [e.advantage_sign for e in batch],
+                    "proposal_origins": [e.proposal_origin for e in batch],
+                },
             )
         )
     return result

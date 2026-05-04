@@ -85,6 +85,7 @@ class TitanTrainer(ForgeActor):
     loss: Callable = lambda logits, **targets: logits
     state_dict_key: str = "model_state_dict"
     recompute_generator_logprobs: bool = False
+    gradient_accumulation_steps: int = 1
 
     def __post_init__(self):
         super().__init__()
@@ -100,7 +101,7 @@ class TitanTrainer(ForgeActor):
 
         self.step = 1  # fragile contract.
         self.num_training_steps = self.training.steps
-        self.gradient_accumulation_steps = 1
+        self.gradient_accumulation_steps = max(1, int(self.gradient_accumulation_steps))
         self._accumulated_microbatches = 0
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
         logger.info("Compiling loss")
@@ -113,6 +114,7 @@ class TitanTrainer(ForgeActor):
         for key in {
             "loss",
             "recompute_generator_logprobs",
+            "gradient_accumulation_steps",
             "state_dict_key",
         }:
             engine_config.pop(key)  # Not part of job config
@@ -260,6 +262,7 @@ class TitanTrainer(ForgeActor):
                         )
                     loss_output = self.loss(logits, **batch.loss_inputs)
                     loss = loss_output.loss
+                    scaled_loss = loss / self.gradient_accumulation_steps
 
                 # Record metrics from loss output
                 for metric in loss_output.metrics:
@@ -272,13 +275,13 @@ class TitanTrainer(ForgeActor):
 
                 # Free to before bwd to avoid peaking memory
                 del logits, loss_output.metrics
-                loss.backward()
+                scaled_loss.backward()
                 self._record_gradient_signal_metrics()
         self._accumulated_microbatches += 1
         return loss
 
     @endpoint
-    async def train_step(self, batches: list[TrainBatch]) -> float:
+    async def train_step(self, batches: list[TrainBatch]) -> dict[str, float | int | bool]:
         t = Tracer("rl_trainer_perf/step", timer="gpu", track_memory=True)
         t.start()
 
@@ -293,8 +296,34 @@ class TitanTrainer(ForgeActor):
 
         t.step("forward_backward")
 
+        record_metric(
+            "rl_trainer/gradient_accumulation_steps",
+            self.gradient_accumulation_steps,
+            Reduce.MEAN,
+        )
+        record_metric(
+            "rl_trainer/accumulated_microbatches",
+            self._accumulated_microbatches,
+            Reduce.MAX,
+        )
+
         current_lr = self.engine.lr_schedulers.schedulers[0].get_last_lr()[0]
         record_metric("rl_trainer/learning_rate", current_lr, Reduce.MIN)
+
+        # TODO: delete item() to avoid cpu-gpu sync
+        loss_value = loss.detach().item()
+        record_metric("rl_trainer/loss", loss_value, Reduce.MEAN)
+
+        if self._accumulated_microbatches < self.gradient_accumulation_steps:
+            record_metric("rl_trainer/optimizer_step_committed", 0, Reduce.SUM)
+            t.stop()
+            return {
+                "loss": loss_value,
+                "optimizer_step": False,
+                "trainer_step": self.step,
+                "accumulated_microbatches": self._accumulated_microbatches,
+                "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            }
 
         self.engine.optimizers.step()
         self.engine.optimizers.zero_grad()
@@ -303,9 +332,7 @@ class TitanTrainer(ForgeActor):
         self.step += 1
         t.step("optimizer_step")
 
-        # TODO: delete item() to avoid cpu-gpu sync
-        loss = loss.detach().item()
-        record_metric("rl_trainer/loss", loss, Reduce.MEAN)
+        record_metric("rl_trainer/optimizer_step_committed", 1, Reduce.SUM)
 
         self.engine.checkpointer.save(
             curr_step=self.step,
@@ -313,7 +340,13 @@ class TitanTrainer(ForgeActor):
         )
         t.step("save_checkpoint")
         t.stop()
-        return loss
+        return {
+            "loss": loss_value,
+            "optimizer_step": True,
+            "trainer_step": self.step,
+            "accumulated_microbatches": self.gradient_accumulation_steps,
+            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+        }
 
     @endpoint
     async def get_config(self) -> TrainerConfig:

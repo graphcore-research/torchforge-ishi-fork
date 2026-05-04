@@ -28,6 +28,21 @@ class Episode:
     reward: float | None = None
     reward_breakdown: dict[str, float] | None = None
     advantage: float | None = None
+    loss_priority: float | None = None
+    group_id: str | None = None
+    rollout_group_size: int | None = None
+    slate_id: str | None = None
+    slate_size: int | None = None
+    slate_rank: int | None = None
+    slate_reward_rank: int | None = None
+    normalized_response: str | None = None
+    target_action: str | None = None
+    response_action: str | None = None
+    validity_class: str | None = None
+    advantage_sign: str | None = None
+    proposal_origin: str | None = None
+    reference_support_token_ids: torch.Tensor | None = None  # [seq_len, top_k]
+    reference_support_probs: torch.Tensor | None = None  # [seq_len, top_k]
     loss_mask: torch.Tensor | None = None
 
     @property
@@ -76,6 +91,19 @@ class Episode:
             "target": str(self.target),
             "reward": self.reward,
             "advantage": self.advantage,
+            "loss_priority": self.loss_priority,
+            "group_id": self.group_id,
+            "rollout_group_size": self.rollout_group_size,
+            "slate_id": self.slate_id,
+            "slate_size": self.slate_size,
+            "slate_rank": self.slate_rank,
+            "slate_reward_rank": self.slate_reward_rank,
+            "normalized_response": self.normalized_response,
+            "target_action": self.target_action,
+            "response_action": self.response_action,
+            "validity_class": self.validity_class,
+            "advantage_sign": self.advantage_sign,
+            "proposal_origin": self.proposal_origin,
             "request_len": self.request_len,
             "response_len": self.response_len,
             "pad_id": self.pad_id,

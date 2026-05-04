@@ -191,3 +191,50 @@ class ReferenceModel(ForgeActor):
         self.step += 1
         t.stop()
         return out
+
+    @endpoint
+    async def forward_topk(
+        self,
+        input_ids: torch.Tensor,
+        top_k: int = 8,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return reference top-k next-token support at every sequence position.
+
+        The returned tensors are aligned to the model logits: position ``t`` is
+        the distribution used to predict token ``t + 1``. Callers can mask the
+        positions they care about during loss computation.
+        """
+        record_metric("reference_perf/forward_topk/count_forward_passes", 1, Reduce.SUM)
+
+        t = Tracer("reference_perf/forward_topk", timer="gpu", track_memory=True)
+        t.start()
+        self.engine.gc_handler.run(self.step)
+
+        input_ids = input_ids.to("cuda")
+        model_inputs = {"tokens": input_ids}
+        if attention_mask is not None:
+            model_inputs.update(make_padding_metadata(attention_mask.to("cuda")))
+
+        optional_context_parallel_ctx = None
+        if self.engine.parallel_dims.pp_enabled:
+            raise NotImplementedError("PP not implemented yet")
+        else:
+            with self.engine.train_context(optional_context_parallel_ctx):
+                with self.engine.maybe_enable_amp:
+                    with torch.inference_mode():
+                        logits = self.model(**model_inputs)
+
+        if isinstance(logits, DTensor):
+            logits = logits.full_tensor()
+
+        top_logprobs, top_token_ids = torch.topk(
+            torch.log_softmax(logits.float(), dim=-1),
+            k=max(1, int(top_k)),
+            dim=-1,
+        )
+        top_probs = top_logprobs.exp()
+
+        self.step += 1
+        t.stop()
+        return top_token_ids.to(torch.long), top_probs

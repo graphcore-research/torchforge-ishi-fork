@@ -420,6 +420,101 @@ class Generator(ForgeActor):
         return completions
 
     @endpoint
+    async def score_token_completions(
+        self,
+        prompt: str,
+        *,
+        prompt_token_ids: list[int],
+        completions: list[dict[str, Any]],
+    ) -> list[Completion]:
+        """Score exact token completions under the current generator policy.
+
+        This is a diagnostic proposal path for tiny finite-action tasks. It
+        avoids synthetic oracle logprobs by asking vLLM for prompt logprobs on
+        the exact ``[prompt_ids + completion_ids]`` sequence.
+        """
+        t = Tracer("generator_perf/score_token_completions", timer="gpu")
+        t.start()
+        record_metric("generator/score_token_completions/count_requests", 1, Reduce.SUM)
+
+        if self.llm is None:
+            raise RuntimeError("Generator not initialized. Call setup() first.")
+
+        scored: list[Completion] = []
+        params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            prompt_logprobs=0,
+            logprobs=0,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+        )
+        prompt_ids = [int(token_id) for token_id in prompt_token_ids]
+
+        for candidate in completions:
+            text = str(candidate["text"])
+            token_ids = [int(token_id) for token_id in candidate["token_ids"]]
+            if not token_ids:
+                continue
+            candidate_metadata = dict(candidate.get("metadata") or {})
+            proposal_origin = str(
+                candidate_metadata.get("proposal_origin", "policy_scored_candidate")
+            )
+            stop_reason = str(candidate.get("stop_reason", proposal_origin))
+
+            request_output = None
+            combined_ids = [*prompt_ids, *token_ids]
+            async for output in self.llm.generate(
+                prompt={"prompt_token_ids": combined_ids},
+                sampling_params=params,
+                request_id=str(uuid.uuid4()),
+            ):
+                request_output = output
+
+            if request_output is None or request_output.prompt_logprobs is None:
+                raise RuntimeError("vLLM did not return prompt_logprobs for scoring.")
+
+            token_logprobs: list[float] = []
+            for offset, token_id in enumerate(token_ids):
+                position = len(prompt_ids) + offset
+                position_logprobs = request_output.prompt_logprobs[position]
+                if position_logprobs is None or token_id not in position_logprobs:
+                    raise RuntimeError(
+                        "vLLM prompt_logprobs did not include scored token "
+                        f"{token_id} at position {position}."
+                    )
+                token_logprobs.append(float(position_logprobs[token_id].logprob))
+
+            metadata = {
+                "proposal_origin": proposal_origin,
+                "policy_scored_candidate_logprobs": "vllm_prompt_logprobs",
+                "num_cached_tokens": request_output.num_cached_tokens,
+                **candidate_metadata,
+            }
+            if proposal_origin == "policy_scored_candidate":
+                metadata["policy_scored_candidate"] = True
+
+            scored.append(
+                Completion(
+                    prompt=to_prompt(prompt),
+                    text=text,
+                    prompt_ids=torch.tensor(prompt_ids),
+                    token_ids=torch.tensor(token_ids),
+                    logprobs=torch.tensor(token_logprobs, dtype=torch.float32),
+                    stop_reason=stop_reason,
+                    generator_version=self.generator_version,
+                    metadata=metadata,
+                )
+            )
+
+        record_metric(
+            "generator/score_token_completions/count_sequences_completed",
+            len(scored),
+            Reduce.SUM,
+        )
+        t.stop()
+        return scored
+
+    @endpoint
     async def stop_runtime(self):
         """Stop the generator and cleanup local resources.
 
