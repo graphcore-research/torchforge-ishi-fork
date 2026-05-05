@@ -19,7 +19,14 @@ from forge.controller import ForgeActor
 from forge.data.utils import batch_to_device
 from forge.observability.metrics import record_metric, Reduce
 from forge.observability.perf_tracker import Tracer
-from forge.rl.loss import create_shifted_targets
+from forge.rl.collate import (
+    configure_varlen_attention,
+    create_positions_from_seq_lens,
+    create_varlen_metadata,
+    extract_response_slices,
+    materialize_dtensor,
+    pad_response_slices,
+)
 from forge.types import TrainBatch
 from monarch.actor import endpoint
 from torch import Tensor
@@ -114,6 +121,7 @@ class TitanTrainer(ForgeActor):
             "state_dict_key",
         }:
             engine_config.pop(key)  # Not part of job config
+        configure_varlen_attention(engine_config["model"])
         self.engine = ForgeEngine(ForgeJobConfig(**engine_config))
         self.engine.checkpointer.load(step=self.step)
         self.engine.optimizers.zero_grad()
@@ -123,10 +131,12 @@ class TitanTrainer(ForgeActor):
         parallel_dims = self.engine.parallel_dims
         optional_context_parallel_ctx = None
 
-        # Create shifted target_ids for next-token prediction
-        # target_ids[i] = input_ids[i+1], with loss_mask applied
-        batch.loss_inputs["target_ids"] = create_shifted_targets(
-            batch.model_inputs["tokens"], batch.loss_inputs.get("loss_mask")
+        seq_lens = batch.meta["seq_lens"]
+        batch.model_inputs["attention_masks"] = create_varlen_metadata(
+            seq_lens, self.engine.device
+        )
+        batch.model_inputs["positions"] = create_positions_from_seq_lens(
+            seq_lens, self.engine.device
         )
 
         if parallel_dims.pp_enabled:
@@ -136,6 +146,15 @@ class TitanTrainer(ForgeActor):
                 assert len(model_parts) == 1
                 with self.engine.maybe_enable_amp:
                     logits = model_parts[0](**batch.model_inputs)
+                    logits = materialize_dtensor(logits)
+                    logits, _ = pad_response_slices(
+                        extract_response_slices(
+                            logits,
+                            batch.meta["seq_lens"],
+                            batch.meta["prompt_lens"],
+                            batch.meta["response_lens"],
+                        )
+                    )
                     loss_output = self.loss(logits, **batch.loss_inputs)
                     loss = loss_output.loss
 

@@ -8,47 +8,25 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from forge.data_models.completion import Completion
 
 
 @dataclass
 class Episode:
     episode_id: str
-    pad_id: int
-    request_len: int
-    response_len: int
     target: Any | None = None
     request: str | None = None
     response: str | None = None
     # Processed data
     completion: Completion | None = None
-    generator_logprobs: torch.Tensor | None = None  # [seq_len]
-    ref_logprobs: torch.Tensor | None = None  # [seq_len]
+    ref_logprobs: torch.Tensor | None = None
     reward: float | None = None
     reward_breakdown: dict[str, float] | None = None
     advantage: float | None = None
-    loss_mask: torch.Tensor | None = None
 
     @property
     def policy_version(self) -> int | None:
         return self.completion.generator_version
-
-    @property
-    def request_tensor(self) -> torch.Tensor:
-        tensor: torch.Tensor = self.completion.prompt_ids.to(torch.long)
-        if tensor.shape[0] < self.request_len:  # left pad
-            diff = self.request_len - tensor.shape[0]
-            tensor = F.pad(tensor, (diff, 0), value=self.pad_id)
-        return tensor
-
-    @property
-    def response_tensor(self) -> torch.Tensor:
-        tensor: torch.Tensor = self.completion.token_ids.to(torch.long)
-        if tensor.shape[0] < self.response_len:  # right pad
-            diff = self.response_len - tensor.shape[0]
-            tensor = F.pad(tensor, (0, diff), value=self.pad_id)
-        return tensor
 
     def to_dict(self, exclude: list[str] | None = None) -> dict[str, Any]:
         """Convert episode to dict, optionally excluding specified fields."""
@@ -60,9 +38,6 @@ class Episode:
             "target": str(self.target),
             "reward": self.reward,
             "advantage": self.advantage,
-            "request_len": self.request_len,
-            "response_len": self.response_len,
-            "pad_id": self.pad_id,
             "ref_logprobs": self.ref_logprobs,
             "completion": self.completion,
         }

@@ -15,9 +15,16 @@ import torch
 from forge.controller import ForgeActor
 from forge.observability.metrics import record_metric, Reduce
 from forge.observability.perf_tracker import Tracer
+from forge.rl.collate import (
+    configure_varlen_attention,
+    create_positions_from_seq_lens,
+    create_varlen_metadata,
+    extract_response_slices,
+    materialize_dtensor,
+    pad_response_slices,
+)
 from forge.rl.loss import compute_logprobs, create_shifted_targets
 from monarch.actor import current_rank, current_size, endpoint
-from torch.distributed.tensor import DTensor
 from torchtitan.config.job_config import (
     Checkpoint,
     Comm,
@@ -120,6 +127,7 @@ class ReferenceModel(ForgeActor):
         engine_config.checkpoint.folder = (
             ""  # hardcode to empty to force load from initial_load_path
         )
+        configure_varlen_attention(engine_config.model)
         self.engine = ForgeEngine(engine_config)
         self.engine.checkpointer.load()
         self.model = self.engine.model_parts[0]  # No pipeline parallelism yet
@@ -127,19 +135,17 @@ class ReferenceModel(ForgeActor):
 
     @endpoint
     async def forward(
-        self, input_ids: torch.Tensor, return_logprobs: bool = True
+        self,
+        input_ids: torch.Tensor,
+        prompt_lens: list[int],
+        response_lens: list[int],
+        seq_lens: list[int],
     ) -> torch.Tensor:
         """
         Args:
             input_ids (torch.Tensor): input token ids with shape [group_size, seq_len].
-            return_logprobs (bool): whether to return log probabilities instead of raw logits.
-
-            return_logprobs flag significantly impacts the amount of data transferred to the caller:
-            - When False: Returns logits with shape [group_size, seq_len, vocab_size].
-              This includes the full vocabulary distribution for each token position.
-
-            - When True: Returns log probabilities with shape [group_size, seq_len].
-              Prompt positions will have logprobs = 0.
+            Returns response log probabilities with shape
+            [num_episodes, max_response_len].
         """
         record_metric("reference_perf/forward/count_forward_passes", 1, Reduce.SUM)
 
@@ -147,9 +153,12 @@ class ReferenceModel(ForgeActor):
         t.start()
         self.engine.gc_handler.run(self.step)
 
-        model_parts = self.engine.model_parts
-        parallel_dims = self.engine.parallel_dims
         input_ids = input_ids.to("cuda")
+        model_inputs = {
+            "tokens": input_ids,
+            "attention_masks": create_varlen_metadata(seq_lens, input_ids.device),
+            "positions": create_positions_from_seq_lens(seq_lens, input_ids.device),
+        }
 
         # optional_context_parallel_ctx = (
         #     dist_utils.create_context_parallel_ctx(
@@ -170,17 +179,20 @@ class ReferenceModel(ForgeActor):
             with self.engine.train_context(optional_context_parallel_ctx):
                 with self.engine.maybe_enable_amp:
                     with torch.inference_mode():
-                        logits = self.model(input_ids)
+                        logits = self.model(**model_inputs)
+                        logits = materialize_dtensor(logits)
 
-                        if return_logprobs:
-                            target_ids = create_shifted_targets(input_ids)
-                            logprobs, _ = self.compute_logprobs(logits, target_ids)
-
-        out = logprobs if return_logprobs else logits
-
-        if isinstance(out, DTensor):
-            out = out.full_tensor()
+                        target_ids = create_shifted_targets(input_ids)
+                        logprobs, _ = self.compute_logprobs(logits, target_ids)
+                        logprobs, _ = pad_response_slices(
+                            extract_response_slices(
+                                logprobs,
+                                seq_lens,
+                                prompt_lens,
+                                response_lens,
+                            )
+                        )
 
         self.step += 1
         t.stop()
-        return out
+        return logprobs
