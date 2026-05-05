@@ -8,8 +8,8 @@ import torch
 from forge.rl.types import Group
 from forge.types import TrainBatch
 from torch.distributed.tensor import DTensor
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from torchtitan.experiments.forge.train_spec import get_train_spec
-from torchtitan.models.attention import VarlenMetadata
 
 
 def _response_logprobs(episode) -> torch.Tensor:
@@ -36,7 +36,7 @@ def _pad_1d_tensors(
 def pack_episode_tokens(
     batch: Group,
 ) -> tuple[torch.Tensor, list[int], list[int], list[int]]:
-    """Pack episodes into a single TorchTitan varlen token stream."""
+    """Pack episodes into a single TorchTitan token stream."""
     packed_tokens: list[torch.Tensor] = []
     prompt_lens: list[int] = []
     response_lens: list[int] = []
@@ -56,19 +56,22 @@ def pack_episode_tokens(
     return tokens, prompt_lens, response_lens, seq_lens
 
 
-def create_varlen_metadata(
+def create_packed_attention_mask(
     seq_lens: list[int], device: torch.device
-) -> VarlenMetadata:
-    cu_seq = torch.zeros(len(seq_lens) + 1, dtype=torch.int32, device=device)
-    if seq_lens:
-        cu_seq[1:] = torch.tensor(seq_lens, dtype=torch.int32, device=device).cumsum(0)
-    max_len = max(seq_lens, default=0)
-    return VarlenMetadata(
-        cu_seq_q=cu_seq,
-        cu_seq_k=cu_seq,
-        max_q=max_len,
-        max_k=max_len,
-    )
+) -> BlockMask:
+    total_len = sum(seq_lens)
+    document_ids = torch.empty((1, total_len), dtype=torch.int32, device=device)
+    seq_start = 0
+    for document_id, seq_len in enumerate(seq_lens):
+        document_ids[0, seq_start : seq_start + seq_len] = document_id
+        seq_start += seq_len
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return (q_idx >= kv_idx) & (
+            document_ids[b, q_idx] == document_ids[b, kv_idx]
+        )
+
+    return create_block_mask(mask_mod, 1, None, total_len, total_len, device=device)
 
 
 def create_positions_from_seq_lens(
@@ -163,18 +166,11 @@ def _pack_response_values(
     return target_ids, generator_logprobs, loss_mask, advantages, ref_logprobs
 
 
-def configure_varlen_attention(model_config) -> None:
-    """Force TorchTitan model args onto varlen attention for packed RL scoring."""
+def configure_packed_attention(model_config) -> None:
+    """Force TorchTitan model args onto flex attention for packed RL scoring."""
     train_spec = get_train_spec(model_config.name)
     model_args = train_spec.model_args[model_config.flavor]
-    attn_type = getattr(model_args, "attn_type", None)
-    if attn_type == "flex":
-        raise ValueError(
-            f"Packed RL requires VarlenMetadata attention, but "
-            f"{model_config.name}/{model_config.flavor} uses flex attention."
-        )
-    if attn_type is not None:
-        model_args.attn_type = "varlen"
+    model_args.attn_type = "flex"
 
 
 def collate(batches: list[Group]) -> list[TrainBatch]:
