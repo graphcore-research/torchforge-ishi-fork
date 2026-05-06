@@ -132,6 +132,10 @@ def materialize_dtensor(value: torch.Tensor) -> torch.Tensor:
     return value
 
 
+def _token_ids(tokens: torch.Tensor) -> list[int]:
+    return [int(token) for token in tokens.detach().cpu().tolist()]
+
+
 def _pack_response_values(
     batch: Group,
     response_lens: list[int],
@@ -202,6 +206,18 @@ def collate(batches: list[Group]) -> list[TrainBatch]:
                     "prompt_lens": prompt_lens,
                     "response_lens": response_lens,
                     "seq_lens": seq_lens,
+                    "episode_ids": [episode.episode_id for episode in batch],
+                    "generator_tokens": [
+                        _token_ids(
+                            torch.cat(
+                                [
+                                    episode.completion.prompt_ids.to(torch.long),
+                                    episode.completion.token_ids.to(torch.long),
+                                ]
+                            )
+                        )
+                        for episode in batch
+                    ],
                 },
             )
         )
