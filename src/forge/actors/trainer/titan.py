@@ -196,38 +196,47 @@ class TitanTrainer(ForgeActor):
         response_lens = batch.meta["response_lens"]
         seq_lens = batch.meta["seq_lens"]
 
-        rows = []
+        logged_episode = None
+        all_sequences_match = True
         episode_start = 0
-        for episode_id, expected_tokens, prompt_len, response_len, seq_len in zip(
+        episodes = zip(
             episode_ids,
             generator_tokens,
             prompt_lens,
             response_lens,
             seq_lens,
             strict=True,
-        ):
+        )
+        for i, (
+            episode_id,
+            expected_tokens,
+            prompt_len,
+            response_len,
+            seq_len,
+        ) in enumerate(episodes):
             actual_tokens = trainer_tokens[episode_start : episode_start + seq_len]
             expected_tensor = torch.tensor(expected_tokens, dtype=torch.long)
-            rows.append(
-                {
+            sequence_matches = torch.equal(actual_tokens, expected_tensor)
+            all_sequences_match = all_sequences_match and bool(sequence_matches)
+            if i == 0:
+                logged_episode = {
                     "episode_id": episode_id,
                     "prompt_len": prompt_len,
                     "response_len": response_len,
                     "seq_len": seq_len,
                     "generator_tokens": expected_tokens,
                     "trainer_tokens": _token_ids(actual_tokens),
-                    "trainer_matches_generator_sequence": bool(
-                        torch.equal(actual_tokens, expected_tensor)
-                    ),
+                    "trainer_matches_generator_sequence": bool(sequence_matches),
                 }
-            )
             episode_start += seq_len
 
         payload = {
             "step": self.step,
             "dp_rank": self.engine.dp_rank,
             "tp_rank": tp_rank,
-            "episodes": rows,
+            "num_episodes": len(seq_lens),
+            "all_trainer_sequences_match_generator": all_sequences_match,
+            "episodes": [logged_episode] if logged_episode is not None else [],
         }
         logger.info(
             "Trainer token context debug: %s",
