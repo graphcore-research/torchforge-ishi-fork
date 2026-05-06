@@ -17,7 +17,7 @@ from forge.observability.metrics import record_metric, Reduce
 from forge.observability.perf_tracker import Tracer
 from forge.rl.collate import (
     configure_packed_attention,
-    create_packed_attention_mask,
+    create_packed_attention_masks,
     create_positions_from_seq_lens,
     extract_response_slices,
     materialize_dtensor,
@@ -156,7 +156,9 @@ class ReferenceModel(ForgeActor):
         input_ids = input_ids.to("cuda")
         model_inputs = {
             "tokens": input_ids,
-            "attention_masks": create_packed_attention_mask(seq_lens, input_ids.device),
+            "attention_masks": create_packed_attention_masks(
+                self.engine.job_config.model, seq_lens, input_ids.device
+            ),
             "positions": create_positions_from_seq_lens(seq_lens, input_ids.device),
         }
 

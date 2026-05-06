@@ -11,6 +11,8 @@ from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from torchtitan.experiments.forge.train_spec import get_train_spec
 
+PackedAttentionMasks = BlockMask | dict[str, BlockMask]
+
 
 def _response_logprobs(episode) -> torch.Tensor:
     if episode.completion.logprobs is None:
@@ -56,8 +58,11 @@ def pack_episode_tokens(
     return tokens, prompt_lens, response_lens, seq_lens
 
 
-def create_packed_attention_mask(
-    seq_lens: list[int], device: torch.device
+def _create_packed_attention_mask(
+    seq_lens: list[int],
+    device: torch.device,
+    *,
+    sliding_window_size: int | None = None,
 ) -> BlockMask:
     total_len = sum(seq_lens)
     document_ids = torch.empty((1, total_len), dtype=torch.int32, device=device)
@@ -67,11 +72,33 @@ def create_packed_attention_mask(
         seq_start += seq_len
 
     def mask_mod(b, h, q_idx, kv_idx):
-        return (q_idx >= kv_idx) & (
+        same_episode = (q_idx >= kv_idx) & (
             document_ids[b, q_idx] == document_ids[b, kv_idx]
         )
+        if sliding_window_size is None:
+            return same_episode
+        return same_episode & (q_idx - kv_idx < sliding_window_size)
 
     return create_block_mask(mask_mod, 1, None, total_len, total_len, device=device)
+
+
+def create_packed_attention_masks(
+    model_config,
+    seq_lens: list[int],
+    device: torch.device,
+) -> PackedAttentionMasks:
+    if model_config.name != "gpt_oss":
+        return _create_packed_attention_mask(seq_lens, device)
+
+    model_args = get_train_spec(model_config.name).model_args[model_config.flavor]
+    return {
+        "basic_mask": _create_packed_attention_mask(seq_lens, device),
+        "sliding_window_mask": _create_packed_attention_mask(
+            seq_lens,
+            device,
+            sliding_window_size=model_args.sliding_window_size,
+        ),
+    }
 
 
 def create_positions_from_seq_lens(

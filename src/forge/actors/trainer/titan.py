@@ -22,7 +22,7 @@ from forge.observability.metrics import record_metric, Reduce
 from forge.observability.perf_tracker import Tracer
 from forge.rl.collate import (
     configure_packed_attention,
-    create_packed_attention_mask,
+    create_packed_attention_masks,
     create_positions_from_seq_lens,
     extract_response_slices,
     materialize_dtensor,
@@ -137,8 +137,8 @@ class TitanTrainer(ForgeActor):
         optional_context_parallel_ctx = None
 
         seq_lens = batch.meta["seq_lens"]
-        batch.model_inputs["attention_masks"] = create_packed_attention_mask(
-            seq_lens, self.engine.device
+        batch.model_inputs["attention_masks"] = create_packed_attention_masks(
+            self.model, seq_lens, self.engine.device
         )
         batch.model_inputs["positions"] = create_positions_from_seq_lens(
             seq_lens, self.engine.device
