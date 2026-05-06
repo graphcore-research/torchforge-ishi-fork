@@ -9,6 +9,10 @@ from forge.rl.types import Group
 from forge.types import TrainBatch
 
 
+def _token_ids(tokens: torch.Tensor) -> list[int]:
+    return [int(token) for token in tokens.detach().cpu().tolist()]
+
+
 def collate(batches: list[Group]) -> list[TrainBatch]:
     """
     Collates a list of batches into TrainBatch objects.
@@ -49,6 +53,31 @@ def collate(batches: list[Group]) -> list[TrainBatch]:
             TrainBatch(
                 model_inputs={"tokens": input_ids},
                 loss_inputs=loss_inputs,
+                meta={
+                    "episode_ids": [episode.episode_id for episode in batch],
+                    "prompt_lens": [
+                        episode.completion.prompt_ids.shape[0] for episode in batch
+                    ],
+                    "response_lens": [
+                        episode.completion.token_ids.shape[0] for episode in batch
+                    ],
+                    "seq_lens": [
+                        episode.completion.prompt_ids.shape[0]
+                        + episode.completion.token_ids.shape[0]
+                        for episode in batch
+                    ],
+                    "generator_tokens": [
+                        _token_ids(
+                            torch.cat(
+                                [
+                                    episode.completion.prompt_ids.to(torch.long),
+                                    episode.completion.token_ids.to(torch.long),
+                                ]
+                            )
+                        )
+                        for episode in batch
+                    ],
+                },
             )
         )
     return result
