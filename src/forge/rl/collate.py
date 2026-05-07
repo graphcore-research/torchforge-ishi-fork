@@ -202,6 +202,7 @@ def configure_packed_attention(model_config) -> None:
     train_spec = get_train_spec(model_config.name)
     model_args = train_spec.model_args[model_config.flavor]
     model_args.attn_type = "flex"
+    model_args.enable_sequence_parallel = False
 
 
 def collate(batches: list[Group]) -> list[TrainBatch]:
