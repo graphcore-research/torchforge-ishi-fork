@@ -1,90 +1,53 @@
-#!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Integration test comparing torchtitan and Hugging Face RefModel outputs.
-This script generates logits from both implementations and verifies they are close.
+"""Compatibility entrypoint for reference-model packed logprob regression tests."""
 
-Example:
->>> python tests/integration_tests/test_titan_fwd_vs_hf_fwd.py \
-        --model_name "Qwen/Qwen3-1.7B" \
-        --titan-model-family "qwen3" \
-        --titan-model-flavor "1.7B" \
-"""
-
-import argparse
-import asyncio
-from dataclasses import dataclass
-
-import numpy as np
+import pytest
 import torch
 from forge.actors.reference_model import ReferenceModel
-from forge.controller import ForgeActor
 from forge.controller.provisioner import shutdown
-from forge.rl.collate import extract_response_slices, pad_response_slices
-from forge.rl.loss import compute_logprobs, create_shifted_targets
+from forge.data_models.completion import Completion
+from forge.data_models.prompt import Prompt
+from forge.rl.collate import pack_episode_tokens
+from forge.rl.types import Episode
 from forge.util.config import _resolve_hf_model_path
-from monarch.actor import endpoint
 from torchtitan.config.job_config import Checkpoint, Compile, Model, Parallelism
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-@dataclass
-class HfReferenceModel(ForgeActor):
-    model_name: str
-    device: torch.device | None = None
-    dtype: torch.dtype = torch.float32
-
-    @endpoint
-    async def setup(self):
-        if self.device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            dtype=self.dtype,
-            trust_remote_code=True,
-        ).to(self.device)
-        self.model.eval()
-
-        self.logger.info(f"Model initialized on {self.device}")
-
-    @endpoint
-    async def forward(
-        self,
-        input_ids: torch.Tensor,
-        prompt_lens: list[int],
-        response_lens: list[int],
-        seq_lens: list[int],
-    ) -> torch.Tensor:
-        input_ids = input_ids.to(self.device)
-        with torch.inference_mode():
-            logits = self.model(input_ids=input_ids).logits
-            target_ids = create_shifted_targets(input_ids)
-            logprobs, _ = compute_logprobs(logits, target_ids)
-            logprobs, _ = pad_response_slices(
-                extract_response_slices(
-                    logprobs,
-                    seq_lens,
-                    prompt_lens,
-                    response_lens,
-                )
-            )
-        return logprobs
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
+)
 
 
-def create_titan_config(model_name: str, model_family: str, model_flavor: str) -> dict:
-    """Create torchtitan configuration for the given model."""
-    resolved_hf_model_path = _resolve_hf_model_path(f"hf://{model_name}")
-    config = {
+def _episode(prompt_ids: list[int], token_ids: list[int]) -> Episode:
+    return Episode(
+        episode_id=f"episode-{len(prompt_ids)}-{len(token_ids)}",
+        request="prompt",
+        response="response",
+        completion=Completion(
+            prompt=Prompt.from_prompt("prompt"),
+            text="response",
+            prompt_ids=torch.tensor(prompt_ids, dtype=torch.long),
+            token_ids=torch.tensor(token_ids, dtype=torch.long),
+            logprobs=torch.zeros(len(token_ids), dtype=torch.float32),
+            generator_version=0,
+        ),
+        advantage=0.0,
+    )
+
+
+def _qwen_reference_config() -> dict:
+    model_path = _resolve_hf_model_path("hf://Qwen/Qwen3-0.6B")
+    return {
         "model": Model(
-            name=model_family,
-            flavor=model_flavor,
-            hf_assets_path=resolved_hf_model_path,
+            name="qwen3",
+            flavor="0.6B",
+            hf_assets_path=model_path,
         ),
         "parallelism": Parallelism(
             data_parallel_replicate_degree=1,
@@ -96,286 +59,41 @@ def create_titan_config(model_name: str, model_family: str, model_flavor: str) -
         ),
         "checkpoint": Checkpoint(
             enable=True,
-            initial_load_path=resolved_hf_model_path,
+            initial_load_path=model_path,
             initial_load_model_only=True,
             initial_load_in_hf=True,
         ),
-        "compile": Compile(
-            enable=False,
-        ),
+        "compile": Compile(enable=False),
     }
-    return config
 
 
-async def initialize_models(
-    model_name: str, titan_model_family: str, titan_model_flavor: str
-) -> tuple[ReferenceModel, HfReferenceModel]:
-    """Initialize both torchtitan and HF models."""
-    # Initialize torchtitan model
-    titan_config = create_titan_config(
-        model_name, titan_model_family, titan_model_flavor
-    )
-    titan_model = await ReferenceModel.options(
-        procs=1, num_replicas=1, with_gpus=True
-    ).as_service(**titan_config)
-
-    # Initialize HF model
-    hf_model = await HfReferenceModel.options(
-        num_replicas=1, procs=1, with_gpus=True
-    ).as_service(model_name=model_name)
-
-    print("Both models initialized successfully")
-    return titan_model, hf_model
-
-
-def create_test_inputs(
-    model_name: str, batch_size: int = 1, seq_len: int = 64
-) -> tuple[torch.Tensor, list[int], list[int], list[int], AutoTokenizer]:
-    """Create test inputs for the models."""
-    # Initialize tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    # Create test prompts
-    test_prompts = [
-        "The quick brown fox jumps over the lazy dog.",
-        "In the beginning was the Word, and the Word was with God.",
-        "To be or not to be, that is the question.",
-        "Hello world! This is a test prompt for model comparison.",
+@pytest.mark.asyncio
+@requires_cuda
+async def test_reference_model_packed_matches_unpacked_qwen() -> None:
+    episodes = [
+        _episode([101, 102, 103], [201, 202]),
+        _episode([111, 112], [211, 212, 213]),
     ]
-
-    # Use first batch_size prompts
-    prompts = test_prompts[:batch_size]
-
-    # Tokenize
-    inputs = tokenizer(
-        prompts, return_tensors="pt", padding=True, truncation=True, max_length=seq_len
-    )
-
-    packed_sequences = []
-    seq_lens = []
-    for input_ids, attention_mask in zip(
-        inputs["input_ids"], inputs["attention_mask"], strict=True
-    ):
-        length = int(attention_mask.sum().item())
-        packed_sequences.append(input_ids[:length])
-        seq_lens.append(length)
-
-    input_ids = torch.cat(packed_sequences).unsqueeze(0)
-    prompt_lens = [1] * len(seq_lens)
-    response_lens = [seq_len - 1 for seq_len in seq_lens]
-
-    print(f"Created test inputs with shape: {input_ids.shape}")
-
-    return input_ids, prompt_lens, response_lens, seq_lens, tokenizer
-
-
-async def generate_logprobs(
-    titan_model: ReferenceModel,
-    hf_model: HfReferenceModel,
-    input_ids: torch.Tensor,
-    prompt_lens: list[int],
-    response_lens: list[int],
-    seq_lens: list[int],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Generate response logprobs from both models."""
-    print("Generating logprobs from torchtitan model...")
-    titan_logprobs = await titan_model.forward.route(
-        input_ids, prompt_lens, response_lens, seq_lens
-    )
-
-    print("Generating logprobs from HF model...")
-    hf_logprobs = await hf_model.forward.route(
-        input_ids, prompt_lens, response_lens, seq_lens
-    )
-
-    return titan_logprobs, hf_logprobs
-
-
-def compare_logprobs(
-    titan_logprobs: torch.Tensor,
-    hf_logprobs: torch.Tensor,
-    rtol: float = 1e-3,
-    atol: float = 1e-3,
-    verbose: bool = True,
-) -> dict[str, float]:
-    """Compare response logprobs from both models and compute metrics."""
-    # Move to CPU for comparison
-    titan_logprobs_cpu = titan_logprobs.detach().cpu().float()
-    hf_logprobs_cpu = hf_logprobs.detach().cpu().float()
-
-    # Basic shape check
-    assert titan_logprobs_cpu.shape == hf_logprobs_cpu.shape, (
-        f"Shape mismatch: titan {titan_logprobs_cpu.shape} vs hf {hf_logprobs_cpu.shape}"
-    )
-
-    # Compute various metrics
-    diff = titan_logprobs_cpu - hf_logprobs_cpu
-    abs_diff = torch.abs(diff)
-    rel_diff = abs_diff / (torch.abs(hf_logprobs_cpu) + 1e-8)
-
-    metrics = {
-        "max_abs_diff": abs_diff.max().item(),
-        "mean_abs_diff": abs_diff.mean().item(),
-        "max_rel_diff": rel_diff.max().item(),
-        "mean_rel_diff": rel_diff.mean().item(),
-        "cosine_similarity": torch.nn.functional.cosine_similarity(
-            titan_logprobs_cpu.flatten(), hf_logprobs_cpu.flatten(), dim=0
-        ).item(),
-    }
-
-    # Check if tensors are close
-    is_close = torch.allclose(titan_logprobs_cpu, hf_logprobs_cpu, rtol=rtol, atol=atol)
-    metrics["is_close"] = is_close
-
-    if verbose:
-        print("=== Logprob Comparison Results ===")
-        print(f"Shapes: {titan_logprobs_cpu.shape}")
-        print(f"Max absolute difference: {metrics['max_abs_diff']:.6f}")
-        print(f"Mean absolute difference: {metrics['mean_abs_diff']:.6f}")
-        print(f"Max relative difference: {metrics['max_rel_diff']:.6f}")
-        print(f"Mean relative difference: {metrics['mean_rel_diff']:.6f}")
-        print(f"Cosine similarity: {metrics['cosine_similarity']:.6f}")
-        print(f"Are close (rtol={rtol}, atol={atol}): {is_close}")
-
-        if not is_close:
-            # Find positions with largest differences
-            flat_abs_diff = abs_diff.flatten()
-            top_diff_indices = torch.topk(
-                flat_abs_diff, k=min(5, len(flat_abs_diff))
-            ).indices
-            print("Top 5 positions with largest absolute differences:")
-            for i, idx in enumerate(top_diff_indices):
-                pos = np.unravel_index(idx.item(), titan_logprobs_cpu.shape)
-                titan_val = titan_logprobs_cpu[pos].item()
-                hf_val = hf_logprobs_cpu[pos].item()
-                diff_val = abs_diff[pos].item()
-                print(
-                    f"  {i + 1}. Position {pos}: titan={titan_val:.6f}, hf={hf_val:.6f}, diff={diff_val:.6f}"
-                )
-
-    return metrics
-
-
-def compare_probabilities(
-    titan_logits: torch.Tensor,
-    hf_logits: torch.Tensor,
-    tokenizer: AutoTokenizer,
-    top_k: int = 10,
-    verbose: bool = True,
-) -> dict[str, float]:
-    """Compare top-k probabilities from both models."""
-    # Convert logits to probabilities
-    titan_probs = torch.softmax(titan_logits.detach().cpu().float(), dim=-1)
-    hf_probs = torch.softmax(hf_logits.detach().cpu().float(), dim=-1)
-
-    # Get top-k predictions for the last token of first sequence
-    titan_top_k = torch.topk(titan_probs[0, -1], k=top_k)
-    hf_top_k = torch.topk(hf_probs[0, -1], k=top_k)
-
-    if verbose:
-        print("\n=== Top-K Token Predictions Comparison ===")
-        print("TorchTitan Top-K:")
-        for i, (prob, token_id) in enumerate(
-            zip(titan_top_k.values, titan_top_k.indices)
-        ):
-            token = tokenizer.decode([token_id.item()])
-            print(f"  {i + 1}. '{token}' (id={token_id.item()}): {prob.item():.6f}")
-
-        print("\nHugging Face Top-K:")
-        for i, (prob, token_id) in enumerate(zip(hf_top_k.values, hf_top_k.indices)):
-            token = tokenizer.decode([token_id.item()])
-            print(f"  {i + 1}. '{token}' (id={token_id.item()}): {prob.item():.6f}")
-
-    # Calculate overlap in top-k predictions
-    titan_top_tokens = set(titan_top_k.indices.tolist())
-    hf_top_tokens = set(hf_top_k.indices.tolist())
-    overlap = len(titan_top_tokens.intersection(hf_top_tokens))
-    overlap_ratio = overlap / top_k
-
-    metrics = {
-        "top_k_overlap": overlap,
-        "top_k_overlap_ratio": overlap_ratio,
-        "top1_match": titan_top_k.indices[0].item() == hf_top_k.indices[0].item(),
-    }
-
-    if verbose:
-        print(f"\nTop-{top_k} overlap: {overlap}/{top_k} ({overlap_ratio:.2%})")
-        print(f"Top-1 prediction match: {metrics['top1_match']}")
-
-    return metrics
-
-
-async def run_comparison(
-    model_name: str,
-    titan_model_family: str,
-    titan_model_flavor: str,
-    batch_size: int = 1,
-    seq_len: int = 64,
-    rtol: float = 1e-3,
-    atol: float = 1e-3,
-    verbose: bool = True,
-) -> dict:
-    """Run the full comparison pipeline."""
-    titan_model, hf_model = await initialize_models(
-        model_name, titan_model_family, titan_model_flavor
-    )
-    input_ids, prompt_lens, response_lens, seq_lens, _ = create_test_inputs(
-        model_name, batch_size, seq_len
-    )
-    titan_logprobs, hf_logprobs = await generate_logprobs(
-        titan_model, hf_model, input_ids, prompt_lens, response_lens, seq_lens
-    )
-    return compare_logprobs(titan_logprobs, hf_logprobs, rtol, atol, verbose)
-
-
-async def main():
-    parser = argparse.ArgumentParser(
-        description="Compare TorchTitan and HF model outputs"
-    )
-    parser.add_argument("--model_name", type=str, required=True, help="Model name/path")
-    parser.add_argument(
-        "--titan-model-family", type=str, help="Model family from Torchtitan spec"
-    )
-    parser.add_argument(
-        "--titan-model-flavor", type=str, help="Model size from Torchtitan spec"
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=1, help="Batch size for testing"
-    )
-    parser.add_argument(
-        "--seq_len", type=int, default=64, help="Sequence length for testing"
-    )
-    parser.add_argument(
-        "--rtol", type=float, default=1e-3, help="Relative tolerance for comparison"
-    )
-    parser.add_argument(
-        "--atol", type=float, default=1e-3, help="Absolute tolerance for comparison"
-    )
-    parser.add_argument("--quiet", action="store_true", help="Reduce output verbosity")
-
-    args = parser.parse_args()
-
+    model = await ReferenceModel.options(
+        procs=1, num_replicas=1, with_gpus=True
+    ).as_service(**_qwen_reference_config())
     try:
-        metrics = await run_comparison(
-            model_name=args.model_name,
-            titan_model_family=args.titan_model_family,
-            titan_model_flavor=args.titan_model_flavor,
-            batch_size=args.batch_size,
-            seq_len=args.seq_len,
-            rtol=args.rtol,
-            atol=args.atol,
-            verbose=not args.quiet,
-        )
-        print("\n=== FINAL SUMMARY ===")
-        print(f"All close (rtol={args.rtol}, atol={args.atol}): {metrics['is_close']}")
-        print(f"Max absolute difference: {metrics['max_abs_diff']:.6f}")
-        print(f"Cosine similarity: {metrics['cosine_similarity']:.6f}")
+        packed_inputs = pack_episode_tokens(episodes)
+        single_a_inputs = pack_episode_tokens([episodes[0]])
+        single_b_inputs = pack_episode_tokens([episodes[1]])
+
+        packed = await model.forward.route(*packed_inputs)
+        single_a = await model.forward.route(*single_a_inputs)
+        single_b = await model.forward.route(*single_b_inputs)
     finally:
+        await model.shutdown()
         await shutdown()
 
-
-if __name__ == "__main__":
-    import sys
-
-    exit_code = asyncio.run(main())
-    sys.exit(exit_code)
+    assert packed.shape == (2, 3)
+    assert torch.allclose(
+        packed[0, :2].cpu(), single_a[0, :2].cpu(), rtol=1e-4, atol=1e-4
+    )
+    assert torch.allclose(
+        packed[1, :3].cpu(), single_b[0, :3].cpu(), rtol=1e-4, atol=1e-4
+    )
+    assert packed[0, 2].item() == 0.0
