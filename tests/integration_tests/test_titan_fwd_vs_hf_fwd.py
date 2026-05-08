@@ -37,7 +37,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 class HfReferenceModel(ForgeActor):
     model_name: str
     device: torch.device | None = None
-    dtype: torch.dtype = torch.bfloat16
+    dtype: torch.dtype = torch.float32
 
     @endpoint
     async def setup(self):
@@ -77,18 +77,6 @@ class HfReferenceModel(ForgeActor):
         return logprobs
 
 
-def parse_torch_dtype(dtype: str) -> torch.dtype:
-    match dtype:
-        case "bfloat16" | "bf16":
-            return torch.bfloat16
-        case "float16" | "fp16":
-            return torch.float16
-        case "float32" | "fp32":
-            return torch.float32
-        case _:
-            raise ValueError(f"Unsupported dtype: {dtype}")
-
-
 def create_titan_config(model_name: str, model_family: str, model_flavor: str) -> dict:
     """Create torchtitan configuration for the given model."""
     resolved_hf_model_path = _resolve_hf_model_path(f"hf://{model_name}")
@@ -120,10 +108,7 @@ def create_titan_config(model_name: str, model_family: str, model_flavor: str) -
 
 
 async def initialize_models(
-    model_name: str,
-    titan_model_family: str,
-    titan_model_flavor: str,
-    hf_dtype: torch.dtype = torch.bfloat16,
+    model_name: str, titan_model_family: str, titan_model_flavor: str
 ) -> tuple[ReferenceModel, HfReferenceModel]:
     """Initialize both torchtitan and HF models."""
     # Initialize torchtitan model
@@ -137,7 +122,7 @@ async def initialize_models(
     # Initialize HF model
     hf_model = await HfReferenceModel.options(
         num_replicas=1, procs=1, with_gpus=True
-    ).as_service(model_name=model_name, dtype=hf_dtype)
+    ).as_service(model_name=model_name)
 
     print("Both models initialized successfully")
     return titan_model, hf_model
@@ -329,11 +314,10 @@ async def run_comparison(
     rtol: float = 1e-3,
     atol: float = 1e-3,
     verbose: bool = True,
-    hf_dtype: torch.dtype = torch.bfloat16,
 ) -> dict:
     """Run the full comparison pipeline."""
     titan_model, hf_model = await initialize_models(
-        model_name, titan_model_family, titan_model_flavor, hf_dtype=hf_dtype
+        model_name, titan_model_family, titan_model_flavor
     )
     input_ids, prompt_lens, response_lens, seq_lens, _ = create_test_inputs(
         model_name, batch_size, seq_len
@@ -367,13 +351,6 @@ async def main():
     parser.add_argument(
         "--atol", type=float, default=1e-3, help="Absolute tolerance for comparison"
     )
-    parser.add_argument(
-        "--hf-dtype",
-        type=str,
-        default="bfloat16",
-        choices=["bfloat16", "bf16", "float16", "fp16", "float32", "fp32"],
-        help="Dtype to use for the Hugging Face reference model",
-    )
     parser.add_argument("--quiet", action="store_true", help="Reduce output verbosity")
 
     args = parser.parse_args()
@@ -388,7 +365,6 @@ async def main():
             rtol=args.rtol,
             atol=args.atol,
             verbose=not args.quiet,
-            hf_dtype=parse_torch_dtype(args.hf_dtype),
         )
         print("\n=== FINAL SUMMARY ===")
         print(f"All close (rtol={args.rtol}, atol={args.atol}): {metrics['is_close']}")
