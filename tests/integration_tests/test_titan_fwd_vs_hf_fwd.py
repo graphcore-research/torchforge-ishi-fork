@@ -25,6 +25,8 @@ import torch
 from forge.actors.reference_model import ReferenceModel
 from forge.controller import ForgeActor
 from forge.controller.provisioner import shutdown
+from forge.rl.collate import extract_response_slices, pad_response_slices
+from forge.rl.loss import compute_logprobs, create_shifted_targets
 from forge.util.config import _resolve_hf_model_path
 from monarch.actor import endpoint
 from torchtitan.config.job_config import Checkpoint, Compile, Model, Parallelism
@@ -52,11 +54,27 @@ class HfReferenceModel(ForgeActor):
         self.logger.info(f"Model initialized on {self.device}")
 
     @endpoint
-    async def forward(self, input_ids) -> torch.Tensor:
+    async def forward(
+        self,
+        input_ids: torch.Tensor,
+        prompt_lens: list[int],
+        response_lens: list[int],
+        seq_lens: list[int],
+    ) -> torch.Tensor:
         input_ids = input_ids.to(self.device)
         with torch.inference_mode():
             logits = self.model(input_ids=input_ids).logits
-        return logits
+            target_ids = create_shifted_targets(input_ids)
+            logprobs, _ = compute_logprobs(logits, target_ids)
+            logprobs, _ = pad_response_slices(
+                extract_response_slices(
+                    logprobs,
+                    seq_lens,
+                    prompt_lens,
+                    response_lens,
+                )
+            )
+        return logprobs
 
 
 def create_titan_config(model_name: str, model_family: str, model_flavor: str) -> dict:
@@ -112,7 +130,7 @@ async def initialize_models(
 
 def create_test_inputs(
     model_name: str, batch_size: int = 1, seq_len: int = 64
-) -> tuple[torch.Tensor, AutoTokenizer]:
+) -> tuple[torch.Tensor, list[int], list[int], list[int], AutoTokenizer]:
     """Create test inputs for the models."""
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -133,46 +151,67 @@ def create_test_inputs(
         prompts, return_tensors="pt", padding=True, truncation=True, max_length=seq_len
     )
 
-    input_ids = inputs["input_ids"]
+    packed_sequences = []
+    seq_lens = []
+    for input_ids, attention_mask in zip(
+        inputs["input_ids"], inputs["attention_mask"], strict=True
+    ):
+        length = int(attention_mask.sum().item())
+        packed_sequences.append(input_ids[:length])
+        seq_lens.append(length)
+
+    input_ids = torch.cat(packed_sequences).unsqueeze(0)
+    prompt_lens = [1] * len(seq_lens)
+    response_lens = [seq_len - 1 for seq_len in seq_lens]
+
     print(f"Created test inputs with shape: {input_ids.shape}")
 
-    return input_ids, tokenizer
+    return input_ids, prompt_lens, response_lens, seq_lens, tokenizer
 
 
-async def generate_logits(
-    titan_model: ReferenceModel, hf_model: HfReferenceModel, input_ids: torch.Tensor
+async def generate_logprobs(
+    titan_model: ReferenceModel,
+    hf_model: HfReferenceModel,
+    input_ids: torch.Tensor,
+    prompt_lens: list[int],
+    response_lens: list[int],
+    seq_lens: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Generate logits from both models."""
-    print("Generating logits from torchtitan model...")
-    titan_logits = await titan_model.forward.route(input_ids, 64, False)
+    """Generate response logprobs from both models."""
+    print("Generating logprobs from torchtitan model...")
+    titan_logprobs = await titan_model.forward.route(
+        input_ids, prompt_lens, response_lens, seq_lens
+    )
 
-    print("Generating logits from HF model...")
-    hf_logits = await hf_model.forward.route(input_ids)
+    print("Generating logprobs from HF model...")
+    hf_logprobs = await hf_model.forward.route(
+        input_ids, prompt_lens, response_lens, seq_lens
+    )
 
-    return titan_logits, hf_logits
+    return titan_logprobs, hf_logprobs
 
 
-def compare_logits(
-    titan_logits: torch.Tensor,
-    hf_logits: torch.Tensor,
+def compare_logprobs(
+    titan_logprobs: torch.Tensor,
+    hf_logprobs: torch.Tensor,
     rtol: float = 1e-3,
     atol: float = 1e-3,
     verbose: bool = True,
 ) -> dict[str, float]:
-    """Compare logits from both models and compute metrics."""
+    """Compare response logprobs from both models and compute metrics."""
     # Move to CPU for comparison
-    titan_logits_cpu = titan_logits.detach().cpu().float()
-    hf_logits_cpu = hf_logits.detach().cpu().float()
+    titan_logprobs_cpu = titan_logprobs.detach().cpu().float()
+    hf_logprobs_cpu = hf_logprobs.detach().cpu().float()
 
     # Basic shape check
-    assert titan_logits_cpu.shape == hf_logits_cpu.shape, (
-        f"Shape mismatch: titan {titan_logits_cpu.shape} vs hf {hf_logits_cpu.shape}"
+    assert titan_logprobs_cpu.shape == hf_logprobs_cpu.shape, (
+        f"Shape mismatch: titan {titan_logprobs_cpu.shape} vs hf {hf_logprobs_cpu.shape}"
     )
 
     # Compute various metrics
-    diff = titan_logits_cpu - hf_logits_cpu
+    diff = titan_logprobs_cpu - hf_logprobs_cpu
     abs_diff = torch.abs(diff)
-    rel_diff = abs_diff / (torch.abs(hf_logits_cpu) + 1e-8)
+    rel_diff = abs_diff / (torch.abs(hf_logprobs_cpu) + 1e-8)
 
     metrics = {
         "max_abs_diff": abs_diff.max().item(),
@@ -180,17 +219,17 @@ def compare_logits(
         "max_rel_diff": rel_diff.max().item(),
         "mean_rel_diff": rel_diff.mean().item(),
         "cosine_similarity": torch.nn.functional.cosine_similarity(
-            titan_logits_cpu.flatten(), hf_logits_cpu.flatten(), dim=0
+            titan_logprobs_cpu.flatten(), hf_logprobs_cpu.flatten(), dim=0
         ).item(),
     }
 
     # Check if tensors are close
-    is_close = torch.allclose(titan_logits_cpu, hf_logits_cpu, rtol=rtol, atol=atol)
+    is_close = torch.allclose(titan_logprobs_cpu, hf_logprobs_cpu, rtol=rtol, atol=atol)
     metrics["is_close"] = is_close
 
     if verbose:
-        print("=== Logits Comparison Results ===")
-        print(f"Shapes: {titan_logits_cpu.shape}")
+        print("=== Logprob Comparison Results ===")
+        print(f"Shapes: {titan_logprobs_cpu.shape}")
         print(f"Max absolute difference: {metrics['max_abs_diff']:.6f}")
         print(f"Mean absolute difference: {metrics['mean_abs_diff']:.6f}")
         print(f"Max relative difference: {metrics['max_rel_diff']:.6f}")
@@ -206,9 +245,9 @@ def compare_logits(
             ).indices
             print("Top 5 positions with largest absolute differences:")
             for i, idx in enumerate(top_diff_indices):
-                pos = np.unravel_index(idx.item(), titan_logits_cpu.shape)
-                titan_val = titan_logits_cpu[pos].item()
-                hf_val = hf_logits_cpu[pos].item()
+                pos = np.unravel_index(idx.item(), titan_logprobs_cpu.shape)
+                titan_val = titan_logprobs_cpu[pos].item()
+                hf_val = hf_logprobs_cpu[pos].item()
                 diff_val = abs_diff[pos].item()
                 print(
                     f"  {i + 1}. Position {pos}: titan={titan_val:.6f}, hf={hf_val:.6f}, diff={diff_val:.6f}"
@@ -280,14 +319,13 @@ async def run_comparison(
     titan_model, hf_model = await initialize_models(
         model_name, titan_model_family, titan_model_flavor
     )
-    input_ids, tokenizer = create_test_inputs(model_name, batch_size, seq_len)
-    titan_logits, hf_logits = await generate_logits(titan_model, hf_model, input_ids)
-    logits_metrics = compare_logits(titan_logits, hf_logits, rtol, atol, verbose)
-    prob_metrics = compare_probabilities(
-        titan_logits, hf_logits, tokenizer, verbose=verbose
+    input_ids, prompt_lens, response_lens, seq_lens, _ = create_test_inputs(
+        model_name, batch_size, seq_len
     )
-    all_metrics = {**logits_metrics, **prob_metrics}
-    return all_metrics
+    titan_logprobs, hf_logprobs = await generate_logprobs(
+        titan_model, hf_model, input_ids, prompt_lens, response_lens, seq_lens
+    )
+    return compare_logprobs(titan_logprobs, hf_logprobs, rtol, atol, verbose)
 
 
 async def main():
@@ -332,7 +370,6 @@ async def main():
         print(f"All close (rtol={args.rtol}, atol={args.atol}): {metrics['is_close']}")
         print(f"Max absolute difference: {metrics['max_abs_diff']:.6f}")
         print(f"Cosine similarity: {metrics['cosine_similarity']:.6f}")
-        print(f"Top-k overlap: ({metrics['top_k_overlap_ratio']:.2%})")
     finally:
         await shutdown()
 

@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import json
 import logging
 import os
 import time
@@ -51,10 +50,6 @@ from torchtitan.experiments.forge.job_config import ForgeJobConfig
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-
-def _token_ids(tokens: torch.Tensor) -> list[int]:
-    return [int(token) for token in tokens.detach().cpu().tolist()]
 
 
 @dataclass
@@ -143,7 +138,6 @@ class TitanTrainer(ForgeActor):
         batch.model_inputs["positions"] = create_positions_from_seq_lens(
             seq_lens, self.engine.device
         )
-        self._log_token_contexts(batch)
 
         if parallel_dims.pp_enabled:
             raise NotImplementedError("PP not implemented yet")
@@ -178,70 +172,6 @@ class TitanTrainer(ForgeActor):
                 loss.backward()
         self._accumulated_microbatches += 1
         return loss
-
-    def _log_token_contexts(self, batch: TrainBatch) -> None:
-        parallel_dims = self.engine.parallel_dims
-        tp_rank = (
-            parallel_dims.get_mesh("tp").get_local_rank()
-            if parallel_dims.tp_enabled
-            else 0
-        )
-        if tp_rank != 0:
-            return
-
-        trainer_tokens = batch.model_inputs["tokens"][0].detach().cpu()
-        generator_tokens = batch.meta["generator_tokens"]
-        episode_ids = batch.meta["episode_ids"]
-        prompt_lens = batch.meta["prompt_lens"]
-        response_lens = batch.meta["response_lens"]
-        seq_lens = batch.meta["seq_lens"]
-
-        logged_episode = None
-        all_sequences_match = True
-        episode_start = 0
-        episodes = zip(
-            episode_ids,
-            generator_tokens,
-            prompt_lens,
-            response_lens,
-            seq_lens,
-            strict=True,
-        )
-        for i, (
-            episode_id,
-            expected_tokens,
-            prompt_len,
-            response_len,
-            seq_len,
-        ) in enumerate(episodes):
-            actual_tokens = trainer_tokens[episode_start : episode_start + seq_len]
-            expected_tensor = torch.tensor(expected_tokens, dtype=torch.long)
-            sequence_matches = torch.equal(actual_tokens, expected_tensor)
-            all_sequences_match = all_sequences_match and bool(sequence_matches)
-            if i == 0:
-                logged_episode = {
-                    "episode_id": episode_id,
-                    "prompt_len": prompt_len,
-                    "response_len": response_len,
-                    "seq_len": seq_len,
-                    "generator_tokens": expected_tokens,
-                    "trainer_tokens": _token_ids(actual_tokens),
-                    "trainer_matches_generator_sequence": bool(sequence_matches),
-                }
-            episode_start += seq_len
-
-        payload = {
-            "step": self.step,
-            "dp_rank": self.engine.dp_rank,
-            "tp_rank": tp_rank,
-            "num_episodes": len(seq_lens),
-            "all_trainer_sequences_match_generator": all_sequences_match,
-            "episodes": [logged_episode] if logged_episode is not None else [],
-        }
-        logger.info(
-            "Trainer token context debug: %s",
-            json.dumps(payload, separators=(",", ":")),
-        )
 
     @endpoint
     async def train_step(self, batches: list[TrainBatch]) -> float:

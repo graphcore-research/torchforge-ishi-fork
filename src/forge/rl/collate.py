@@ -50,10 +50,9 @@ def pack_episode_tokens(
         prompt_lens.append(prompt_ids.shape[0])
         response_lens.append(response_ids.shape[0])
 
-    if packed_tokens:
-        tokens = torch.cat(packed_tokens).unsqueeze(0)
-    else:
-        tokens = torch.empty((1, 0), dtype=torch.long)
+    if not packed_tokens:
+        raise ValueError("No episodes to pack tokens from")
+    tokens = torch.cat(packed_tokens).unsqueeze(0)
     seq_lens = [p + r for p, r in zip(prompt_lens, response_lens, strict=True)]
     return tokens, prompt_lens, response_lens, seq_lens
 
@@ -105,8 +104,6 @@ def create_positions_from_seq_lens(
     seq_lens: list[int], device: torch.device
 ) -> torch.Tensor:
     positions = [torch.arange(seq_len, device=device) for seq_len in seq_lens]
-    if not positions:
-        return torch.empty((1, 0), dtype=torch.long, device=device)
     return torch.cat(positions).unsqueeze(0)
 
 
@@ -116,7 +113,11 @@ def extract_response_slices(
     prompt_lens: list[int],
     response_lens: list[int],
 ) -> list[torch.Tensor]:
-    """Extract response prediction positions from packed next-token values."""
+    """Extract per-episode logits or logprobs that score response tokens.
+
+    Because values are next-token predictions, each slice starts at the final
+    prompt position and has length ``response_len``.
+    """
     seq_start = 0
     result = []
     for seq_len, prompt_len, response_len in zip(
@@ -134,10 +135,16 @@ def pad_response_slices(
     *,
     pad_value: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    max_len = max((value.shape[0] for value in values), default=0)
-    if not values:
-        return torch.empty((0, 0)), torch.empty((0, 0), dtype=torch.float32)
+    """Pad per-episode response slices into a dense batch.
 
+    Response lengths can vary across packed episodes, but loss and logprob code
+    expects dense tensors. This pads each slice to the longest response length and
+    returns a mask marking the real, unpadded positions.
+    """
+    if not values:
+        raise ValueError("pad_response_slices requires at least one response slice")
+
+    max_len = max(value.shape[0] for value in values)
     sample = values[0]
     shape = (len(values), max_len, *sample.shape[1:])
     padded = torch.full(
@@ -159,14 +166,17 @@ def materialize_dtensor(value: torch.Tensor) -> torch.Tensor:
     return value
 
 
-def _token_ids(tokens: torch.Tensor) -> list[int]:
-    return [int(token) for token in tokens.detach().cpu().tolist()]
-
-
 def _pack_response_values(
     batch: Group,
     response_lens: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Build dense per-response tensors for the trainer loss.
+
+    Episodes are packed together for the model forward pass, but their response
+    lengths can differ. The loss expects rectangular batch tensors, so response
+    token targets, generator logprobs, masks, advantages, and optional reference
+    logprobs are padded here to a common response length.
+    """
     target_ids = _pad_1d_tensors(
         [e.completion.token_ids.to(torch.long) for e in batch],
         pad_value=0,
@@ -234,18 +244,6 @@ def collate(batches: list[Group]) -> list[TrainBatch]:
                     "prompt_lens": prompt_lens,
                     "response_lens": response_lens,
                     "seq_lens": seq_lens,
-                    "episode_ids": [episode.episode_id for episode in batch],
-                    "generator_tokens": [
-                        _token_ids(
-                            torch.cat(
-                                [
-                                    episode.completion.prompt_ids.to(torch.long),
-                                    episode.completion.token_ids.to(torch.long),
-                                ]
-                            )
-                        )
-                        for episode in batch
-                    ],
                 },
             )
         )
