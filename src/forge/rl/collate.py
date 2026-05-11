@@ -10,8 +10,9 @@ from forge.types import TrainBatch
 from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from torchtitan.experiments.forge.train_spec import get_train_spec
+from torchtitan.models.attention import VarlenMetadata
 
-PackedAttentionMasks = BlockMask | dict[str, BlockMask]
+PackedAttentionMasks = BlockMask | dict[str, BlockMask] | VarlenMetadata
 
 
 def _response_logprobs(episode) -> torch.Tensor:
@@ -81,11 +82,36 @@ def _create_packed_attention_mask(
     return create_block_mask(mask_mod, 1, None, total_len, total_len, device=device)
 
 
+def create_packed_varlen_metadata(
+    seq_lens: list[int], device: torch.device
+) -> VarlenMetadata:
+    """Build varlen metadata from packed episode lengths.
+
+    This mirrors TorchTitan RL's reset-position document boundaries without
+    relying on EOS tokens to split episodes.
+    """
+    boundaries = [0]
+    total_len = 0
+    for seq_len in seq_lens:
+        total_len += int(seq_len)
+        boundaries.append(total_len)
+    cu_seq = torch.tensor(boundaries, dtype=torch.int32, device=device)
+    max_seq_len = max(seq_lens, default=0)
+    return VarlenMetadata(
+        cu_seq_q=cu_seq,
+        cu_seq_k=cu_seq,
+        max_q=max_seq_len,
+        max_k=max_seq_len,
+    )
+
+
 def create_packed_attention_masks(
     model_config,
     seq_lens: list[int],
     device: torch.device,
 ) -> PackedAttentionMasks:
+    if model_config.name == "qwen3":
+        return create_packed_varlen_metadata(seq_lens, device)
     if model_config.name != "gpt_oss":
         return _create_packed_attention_mask(seq_lens, device)
 
@@ -153,7 +179,9 @@ def pad_response_slices(
         dtype=sample.dtype,
         device=sample.device,
     )
-    mask = torch.zeros((len(values), max_len), dtype=torch.float32, device=sample.device)
+    mask = torch.zeros(
+        (len(values), max_len), dtype=torch.float32, device=sample.device
+    )
     for i, value in enumerate(values):
         padded[i, : value.shape[0], ...] = value
         mask[i, : value.shape[0]] = 1.0
@@ -208,10 +236,10 @@ def _pack_response_values(
 
 
 def configure_packed_attention(model_config) -> None:
-    """Force TorchTitan model args onto flex attention for packed RL scoring."""
+    """Configure TorchTitan model args for packed RL scoring."""
     train_spec = get_train_spec(model_config.name)
     model_args = train_spec.model_args[model_config.flavor]
-    model_args.attn_type = "flex"
+    model_args.attn_type = "varlen" if model_config.name == "qwen3" else "flex"
     model_args.enable_sequence_parallel = False
 
 

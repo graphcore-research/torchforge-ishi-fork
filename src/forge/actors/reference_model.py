@@ -127,10 +127,18 @@ class ReferenceModel(ForgeActor):
         engine_config.checkpoint.folder = (
             ""  # hardcode to empty to force load from initial_load_path
         )
+        reference_dtype = None
+        if engine_config.model.name == "qwen3":
+            # PyTorch varlen attention is FlashAttention-backed and requires fp16/bf16.
+            engine_config.training.dtype = "bfloat16"
+            reference_dtype = torch.bfloat16
         configure_packed_attention(engine_config.model)
         self.engine = ForgeEngine(engine_config)
         self.engine.checkpointer.load()
         self.model = self.engine.model_parts[0]  # No pipeline parallelism yet
+        if reference_dtype is not None:
+            # The checkpoint loader leaves this tiny reference fixture in fp32.
+            self.model.to(dtype=reference_dtype)
         self.model.eval()
 
     @endpoint
@@ -154,14 +162,17 @@ class ReferenceModel(ForgeActor):
         self.engine.gc_handler.run(self.step)
 
         input_ids = input_ids.to("cuda")
+        attention_masks = create_packed_attention_masks(
+            self.engine.job_config.model,
+            seq_lens,
+            input_ids.device,
+        )
+        positions = create_positions_from_seq_lens(seq_lens, input_ids.device)
         model_inputs = {
             "tokens": input_ids,
-            "attention_masks": create_packed_attention_masks(
-                self.engine.job_config.model, seq_lens, input_ids.device
-            ),
-            "positions": create_positions_from_seq_lens(seq_lens, input_ids.device),
+            "attention_masks": attention_masks,
+            "positions": positions,
         }
-
         # optional_context_parallel_ctx = (
         #     dist_utils.create_context_parallel_ctx(
         #         cp_mesh=parallel_dims.world_mesh["cp"],
@@ -180,15 +191,21 @@ class ReferenceModel(ForgeActor):
             # (jackkhuu) Not sure if either context are needed for inference here
             with self.engine.train_context(optional_context_parallel_ctx):
                 with self.engine.maybe_enable_amp:
-                    with torch.inference_mode():
+                    # GPT-OSS attention sinks are not compatible with inference_mode's
+                    # version-counter behavior; no_grad still avoids gradient tracking.
+                    inference_context = (
+                        torch.no_grad()
+                        if self.engine.job_config.model.name == "gpt_oss"
+                        else torch.inference_mode()
+                    )
+                    with inference_context:
                         logits = self.model(**model_inputs)
                         logits = materialize_dtensor(logits)
-
                         target_ids = create_shifted_targets(input_ids)
-                        logprobs, _ = self.compute_logprobs(logits, target_ids)
-                        logprobs, _ = pad_response_slices(
+                        packed_logprobs, _ = self.compute_logprobs(logits, target_ids)
+                        response_logprobs, _ = pad_response_slices(
                             extract_response_slices(
-                                logprobs,
+                                packed_logprobs,
                                 seq_lens,
                                 prompt_lens,
                                 response_lens,
@@ -197,4 +214,4 @@ class ReferenceModel(ForgeActor):
 
         self.step += 1
         t.stop()
-        return logprobs
+        return response_logprobs

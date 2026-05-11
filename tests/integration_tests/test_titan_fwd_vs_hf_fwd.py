@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Compatibility entrypoint for reference-model packed logprob regression tests."""
+"""Compare TorchTitan reference-model packed scoring against Hugging Face."""
+
+import asyncio
 
 import pytest
 import torch
@@ -15,8 +17,9 @@ from forge.data_models.prompt import Prompt
 from forge.rl.collate import pack_episode_tokens
 from forge.rl.types import Episode
 from forge.util.config import _resolve_hf_model_path
+from torch.nn.utils.rnn import pad_sequence
 from torchtitan.config.job_config import Checkpoint, Compile, Model, Parallelism
-
+from transformers import AutoModelForCausalLM
 
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -67,33 +70,84 @@ def _qwen_reference_config() -> dict:
     }
 
 
-@pytest.mark.asyncio
+def _response_logprobs_from_logits(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    *,
+    prompt_len: int,
+    response_len: int,
+) -> torch.Tensor:
+    target_ids = torch.full_like(input_ids, -100)
+    target_ids[:, :-1] = input_ids[:, 1:]
+    gathered_targets = target_ids.clamp(min=0)
+    logprobs = logits.float().log_softmax(dim=-1)
+    token_logprobs = logprobs.gather(
+        dim=-1, index=gathered_targets.unsqueeze(-1)
+    ).squeeze(-1)
+    start = prompt_len - 1
+    return token_logprobs[0, start : start + response_len]
+
+
+@torch.inference_mode()
+def _hf_response_logprobs(
+    hf_model: AutoModelForCausalLM,
+    episodes: list[Episode],
+) -> torch.Tensor:
+    slices = []
+    for episode in episodes:
+        input_ids = torch.cat(
+            [episode.completion.prompt_ids, episode.completion.token_ids]
+        ).unsqueeze(0)
+        input_ids = input_ids.to(hf_model.device)
+        logits = hf_model(input_ids=input_ids).logits
+        slices.append(
+            _response_logprobs_from_logits(
+                logits,
+                input_ids,
+                prompt_len=len(episode.completion.prompt_ids),
+                response_len=len(episode.completion.token_ids),
+            ).cpu()
+        )
+    return pad_sequence(slices, batch_first=True, padding_value=0.0)
+
+
 @requires_cuda
-async def test_reference_model_packed_matches_unpacked_qwen() -> None:
-    episodes = [
-        _episode([101, 102, 103], [201, 202]),
-        _episode([111, 112], [211, 212, 213]),
-    ]
-    model = await ReferenceModel.options(
-        procs=1, num_replicas=1, with_gpus=True
-    ).as_service(**_qwen_reference_config())
-    try:
-        packed_inputs = pack_episode_tokens(episodes)
-        single_a_inputs = pack_episode_tokens([episodes[0]])
-        single_b_inputs = pack_episode_tokens([episodes[1]])
+def test_reference_model_packed_logprobs_match_hf_qwen() -> None:
+    """Check production packed Qwen reference logprobs against Hugging Face."""
 
-        packed = await model.forward.route(*packed_inputs)
-        single_a = await model.forward.route(*single_a_inputs)
-        single_b = await model.forward.route(*single_b_inputs)
-    finally:
-        await model.shutdown()
-        await shutdown()
+    async def run() -> None:
+        config = _qwen_reference_config()
+        episodes = [
+            _episode([101, 102, 103], [201, 202]),
+            _episode([111, 112], [211, 212, 213]),
+        ]
 
-    assert packed.shape == (2, 3)
-    assert torch.allclose(
-        packed[0, :2].cpu(), single_a[0, :2].cpu(), rtol=1e-4, atol=1e-4
-    )
-    assert torch.allclose(
-        packed[1, :3].cpu(), single_b[0, :3].cpu(), rtol=1e-4, atol=1e-4
-    )
-    assert packed[0, 2].item() == 0.0
+        titan_model = await ReferenceModel.options(
+            procs=1, num_replicas=1, with_gpus=True
+        ).as_service(**config)
+        try:
+            titan_logprobs = await titan_model.forward.route(
+                *pack_episode_tokens(episodes)
+            )
+        finally:
+            await titan_model.shutdown()
+            await shutdown()
+
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            config["model"].hf_assets_path,
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+        ).to("cuda")
+        hf_model.eval()
+        try:
+            hf_logprobs = _hf_response_logprobs(hf_model, episodes)
+        finally:
+            del hf_model
+            torch.cuda.empty_cache()
+
+        assert titan_logprobs.shape == hf_logprobs.shape
+        torch.testing.assert_close(
+            titan_logprobs.cpu(), hf_logprobs.cpu(), rtol=1e-3, atol=1e-3
+        )
+
+    asyncio.run(run())
